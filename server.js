@@ -24,10 +24,13 @@ class ClientManager {
         this.clients = new Map();
         this.webClients = new Set();
         this.heartbeatInterval = 30000;
+        this.reconnectInterval = 10000;
+        this.maxReconnectAttempts = 5;
         this.startHeartbeat();
+        this.startReconnectLoop();
     }
 
-    addClient(socket, ip, port) {
+    addClient(socket, ip, port, reconnectAttempts = 0) {
         const clientId = `${ip}:${port}`;
         const client = {
             id: clientId,
@@ -40,7 +43,9 @@ class ClientManager {
             lastSeen: new Date(),
             logDir: path.join(LOGS_DIR, ip.replace(/\./g, '_')),
             commandQueue: [],
-            pendingResponse: null
+            pendingResponse: null,
+            reconnectAttempts,
+            shouldReconnect: true
         };
 
         if (!fs.existsSync(client.logDir)) {
@@ -54,10 +59,11 @@ class ClientManager {
         return client;
     }
 
-    removeClient(clientId) {
+    removeClient(clientId, shouldReconnect = true) {
         const client = this.clients.get(clientId);
         if (client) {
             client.status = 'offline';
+            client.shouldReconnect = shouldReconnect;
             this.broadcastToWeb({ type: 'client_disconnected', clientId });
         }
     }
@@ -80,12 +86,13 @@ class ClientManager {
         });
 
         client.socket.on('close', () => {
-            this.removeClient(client.id);
+            console.log(`客户端 ${client.id} 连接关闭，将尝试重连`);
+            this.removeClient(client.id, true);
         });
 
         client.socket.on('error', (err) => {
             console.error(`客户端 ${client.id} 错误:`, err.message);
-            this.removeClient(client.id);
+            this.removeClient(client.id, true);
         });
     }
 
@@ -161,6 +168,45 @@ class ClientManager {
         }, this.heartbeatInterval);
     }
 
+    startReconnectLoop() {
+        setInterval(() => {
+            this.clients.forEach(async (client, clientId) => {
+                if (client.status === 'offline' && client.shouldReconnect) {
+                    if (client.reconnectAttempts >= this.maxReconnectAttempts) {
+                        console.log(`客户端 ${clientId} 重连次数已达上限，停止重连`);
+                        client.shouldReconnect = false;
+                        return;
+                    }
+
+                    console.log(`尝试重连客户端: ${clientId} (第 ${client.reconnectAttempts + 1} 次)`);
+                    
+                    try {
+                        const result = await this.tryReconnect(client.ip, client.port, client.reconnectAttempts + 1);
+                        if (result) {
+                            console.log(`客户端 ${clientId} 重连成功`);
+                            client.reconnectAttempts = 0;
+                            client.shouldReconnect = true;
+                        } else {
+                            client.reconnectAttempts++;
+                        }
+                    } catch (e) {
+                        console.error(`重连失败: ${clientId}`, e.message);
+                        client.reconnectAttempts++;
+                    }
+                }
+            });
+        }, this.reconnectInterval);
+    }
+
+    async tryReconnect(ip, port, reconnectAttempts) {
+        try {
+            const result = await this.tryConnect(ip, port, reconnectAttempts);
+            return result;
+        } catch (e) {
+            return null;
+        }
+    }
+
     getClientInfo(client) {
         return {
             id: client.id,
@@ -221,7 +267,7 @@ class ClientManager {
         return foundClients;
     }
 
-    tryConnect(ip, port) {
+    tryConnect(ip, port, reconnectAttempts = 0) {
         return new Promise((resolve) => {
             const socket = new net.Socket();
             socket.setTimeout(5000);
@@ -233,14 +279,16 @@ class ClientManager {
                 if (!resolved) {
                     resolved = true;
                     socket.destroy();
-                    this.clients.delete(clientId);
+                    if (!this.clients.has(clientId) || this.clients.get(clientId).status === 'offline') {
+                        this.clients.delete(clientId);
+                    }
                     resolve(null);
                 }
             };
 
             socket.connect(port, ip, () => {
                 console.log(`TCP 连接成功: ${ip}:${port}`);
-                const client = this.addClient(socket, ip, port);
+                const client = this.addClient(socket, ip, port, reconnectAttempts);
                 
                 const checkStatus = () => {
                     if (resolved) return;
@@ -326,8 +374,9 @@ wss.on('connection', (ws) => {
                 case 'disconnect_client':
                     const targetClient = clientManager.clients.get(data.clientId);
                     if (targetClient) {
+                        targetClient.shouldReconnect = false;
                         targetClient.socket.end();
-                        clientManager.removeClient(data.clientId);
+                        clientManager.removeClient(data.clientId, false);
                     }
                     ws.send(JSON.stringify({ type: 'disconnected', clientId: data.clientId }));
                     break;
