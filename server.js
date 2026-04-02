@@ -15,6 +15,7 @@ app.use(express.json());
 app.use(express.static('public'));
 
 const LOGS_DIR = path.join(__dirname, 'logs');
+const KNOWN_CLIENTS_FILE = path.join(__dirname, 'known_clients.json');
 if (!fs.existsSync(LOGS_DIR)) {
     fs.mkdirSync(LOGS_DIR, { recursive: true });
 }
@@ -23,9 +24,11 @@ class ClientManager {
     constructor() {
         this.clients = new Map();
         this.webClients = new Set();
+        this.knownClients = new Set();
         this.heartbeatInterval = 30000;
         this.reconnectInterval = 10000;
         this.maxReconnectAttempts = 5;
+        this.loadKnownClients();
         this.startHeartbeat();
         this.startReconnectLoop();
     }
@@ -53,6 +56,8 @@ class ClientManager {
         }
 
         this.clients.set(clientId, client);
+        this.knownClients.add(clientId);
+        this.saveKnownClients();
         this.setupSocketListeners(client);
         this.broadcastToWeb({ type: 'client_connected', client: this.getClientInfo(client) });
         
@@ -198,12 +203,27 @@ class ClientManager {
         }, this.reconnectInterval);
     }
 
-    async tryReconnect(ip, port, reconnectAttempts) {
+    loadKnownClients() {
         try {
-            const result = await this.tryConnect(ip, port, reconnectAttempts);
-            return result;
+            if (fs.existsSync(KNOWN_CLIENTS_FILE)) {
+                const data = fs.readFileSync(KNOWN_CLIENTS_FILE, 'utf-8');
+                const clients = JSON.parse(data);
+                clients.forEach(client => this.knownClients.add(`${client.ip}:${client.port}`));
+            }
         } catch (e) {
-            return null;
+            console.error('加载已知客户端失败:', e);
+        }
+    }
+
+    saveKnownClients() {
+        try {
+            const clients = Array.from(this.knownClients).map(id => {
+                const [ip, port] = id.split(':');
+                return { ip, port: parseInt(port) };
+            });
+            fs.writeFileSync(KNOWN_CLIENTS_FILE, JSON.stringify(clients, null, 2));
+        } catch (e) {
+            console.error('保存已知客户端失败:', e);
         }
     }
 
@@ -220,7 +240,30 @@ class ClientManager {
     }
 
     getAllClients() {
-        return Array.from(this.clients.values()).map(c => this.getClientInfo(c));
+        const allClients = [];
+        
+        // 添加当前在线客户端
+        for (const client of this.clients.values()) {
+            allClients.push(this.getClientInfo(client));
+        }
+        
+        // 添加已知但离线的客户端
+        for (const clientId of this.knownClients) {
+            if (!this.clients.has(clientId)) {
+                const [ip, port] = clientId.split(':');
+                allClients.push({
+                    id: clientId,
+                    ip,
+                    port: parseInt(port),
+                    status: 'offline',
+                    recording: false,
+                    uploadEnabled: false,
+                    lastSeen: null
+                });
+            }
+        }
+        
+        return allClients;
     }
 
     addWebClient(ws) {
@@ -269,11 +312,13 @@ class ClientManager {
 
     tryConnect(ip, port, reconnectAttempts = 0) {
         return new Promise((resolve) => {
+            // 清理 IP 地址，移除 CIDR 表示法中的 / 部分
+            const cleanIp = ip.split('/')[0];
             const socket = new net.Socket();
             socket.setTimeout(5000);
             
             let resolved = false;
-            const clientId = `${ip}:${port}`;
+            const clientId = `${cleanIp}:${port}`;
 
             const cleanup = () => {
                 if (!resolved) {
@@ -286,9 +331,9 @@ class ClientManager {
                 }
             };
 
-            socket.connect(port, ip, () => {
-                console.log(`TCP 连接成功: ${ip}:${port}`);
-                const client = this.addClient(socket, ip, port, reconnectAttempts);
+            socket.connect(port, cleanIp, () => {
+                console.log(`TCP 连接成功: ${cleanIp}:${port}`);
+                const client = this.addClient(socket, cleanIp, port, reconnectAttempts);
                 
                 const checkStatus = () => {
                     if (resolved) return;
@@ -454,7 +499,7 @@ app.get('/api/clients/:clientId/logs/:filename/download', (req, res) => {
 
 app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: '10mb' }), (req, res) => {
     const ip = req.params.ip;
-    const clientId = clientManager.clients.keys().find(id => id.startsWith(ip));
+    const clientId = Array.from(clientManager.clients.keys()).find(id => id.startsWith(ip));
     
     if (!clientId) {
         return res.status(404).json({ error: '客户端不存在' });
@@ -473,7 +518,18 @@ app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: '10mb' }), 
 });
 
 const PORT = process.env.PORT || 3232;
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
     console.log(`服务器运行在端口 ${PORT}`);
     console.log(`访问 http://localhost:${PORT} 打开管理界面`);
+    
+    // 启动后尝试连接已知客户端
+    for (const clientId of clientManager.knownClients) {
+        const [ip, port] = clientId.split(':');
+        console.log(`尝试连接已知客户端: ${ip}:${port}`);
+        try {
+            await clientManager.tryConnect(ip, parseInt(port));
+        } catch (e) {
+            console.log(`连接已知客户端失败: ${clientId}`);
+        }
+    }
 });
