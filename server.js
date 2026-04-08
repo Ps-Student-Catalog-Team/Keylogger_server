@@ -7,9 +7,11 @@ const fs = require('fs');
 const cors = require('cors');
 const axios = require('axios');
 const mysql = require('mysql2/promise');
+const jschardet = require('jschardet');
+const iconv = require('iconv-lite');
 require('dotenv').config();
 
-//  初始化 Express 
+// 初始化 Express
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -18,7 +20,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-//  Alist 客户端 
+// Alist 客户端配置
 const ALIST_CONFIG = {
     url: process.env.ALIST_URL || 'http://10.88.202.73:5244',
     basePath: process.env.ALIST_BASE_PATH || '/学生目录/log',
@@ -127,12 +129,36 @@ class AlistClient {
         }
     }
 
-    async readFile(filePath) {
-        const fullPath = this._getFullPath(filePath);
-        return await this._request('GET', `/api/fs/get?path=${encodeURIComponent(fullPath)}`, null, {
-            responseType: 'text'
-        });
+async readFile(filePath) {
+    const fullPath = this._getFullPath(filePath);
+    const result = await this._request('GET', `/api/fs/get?path=${encodeURIComponent(fullPath)}`);
+    
+    if (result.code === 200 && result.data) {
+        // 获取文件原始二进制数据（Buffer）
+        let buffer;
+        if (result.data.raw_url) {
+            const response = await axios.get(result.data.raw_url, {
+                responseType: 'arraybuffer',  // 以二进制形式获取
+                headers: { 'Authorization': this.token }
+            });
+            buffer = Buffer.from(response.data);
+        } else if (result.data.content) {
+            buffer = Buffer.from(result.data.content, 'base64');
+        } else {
+            throw new Error('无法获取文件内容');
+        }
+
+        // 检测编码
+        const detected = jschardet.detect(buffer);
+        const encoding = detected.encoding || 'utf-8';
+        console.log(`[readFile] 检测到编码: ${encoding}, 置信度: ${detected.confidence}`);
+
+        // 转换为 UTF-8 字符串
+        return iconv.decode(buffer, encoding);
     }
+    throw new Error('文件内容获取失败或文件不存在');
+}
+
 
     async downloadFile(filePath, res) {
         const fullPath = this._getFullPath(filePath);
@@ -163,7 +189,7 @@ class AlistClient {
 
 const alistClient = new AlistClient(ALIST_CONFIG);
 
-//  MySQL 连接池 
+// MySQL 连接池
 const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT) || 3306,
@@ -259,7 +285,7 @@ async function updateLastSeen(clientId) {
     }
 }
 
-//  ClientManager 
+// ClientManager
 const TCP_LISTEN_PORT = parseInt(process.env.TCP_PORT) || 9999;
 
 class ClientManager {
@@ -350,7 +376,6 @@ class ClientManager {
         client.socket.on('close', () => {
             console.log(`客户端 ${client.id} 连接断开`);
             client.status = 'offline';
-            // 更新最后在线时间
             const now = new Date();
             client.lastSeen = now;
             if (this.knownClients.has(client.id)) {
@@ -469,11 +494,9 @@ class ClientManager {
 
     getAllClients() {
         const allClients = [];
-        // 在线客户端
         for (const client of this.clients.values()) {
             allClients.push(this.getClientInfo(client));
         }
-        // 离线但已知的客户端
         for (const [clientId, info] of this.knownClients.entries()) {
             if (!this.clients.has(clientId)) {
                 allClients.push({
@@ -511,7 +534,6 @@ class ClientManager {
         });
     }
 
-    // 主动扫描
     async scanNetwork(startIp, endIp, ports = [9999]) {
         const startParts = startIp.split('.').map(Number);
         const endParts = endIp.split('.').map(Number);
@@ -539,7 +561,7 @@ class ClientManager {
         console.log(`开始扫描网络: ${startIp} - ${endIp}, 端口: ${ports.join(',')}`);
 
         const foundClients = [];
-        const concurrency = 1000;//并行扫描数量
+        const concurrency = 1000;
         const ipList = [];
         for (let i = 0; i < total; i++) {
             ipList.push(intToIp(startInt + i));
@@ -658,7 +680,32 @@ class ClientManager {
 
 const clientManager = new ClientManager();
 
-//WebSocket 处理
+// 辅助函数：根据 clientId 获取客户端信息（支持离线）
+function getClientInfoById(clientId) {
+    // 先尝试在线客户端
+    let client = clientManager.clients.get(clientId);
+    if (client) {
+        return {
+            exists: true,
+            isOnline: true,
+            ip: client.ip,
+            logDir: client.logDir
+        };
+    }
+    // 再尝试已知客户端（离线）
+    const known = clientManager.knownClients.get(clientId);
+    if (known) {
+        return {
+            exists: true,
+            isOnline: false,
+            ip: known.ip,
+            logDir: alistClient.basePath   // 使用默认日志目录
+        };
+    }
+    return { exists: false };
+}
+
+// WebSocket 处理
 wss.on('connection', (ws) => {
     console.log('Web 客户端已连接');
     clientManager.addWebClient(ws);
@@ -722,19 +769,21 @@ wss.on('connection', (ws) => {
     });
 });
 
-//HTTP API
+// HTTP API
+
 app.get('/api/clients', (req, res) => {
     res.json(clientManager.getAllClients());
 });
 
+// 日志列表 API（支持离线）
 app.get('/api/clients/:clientId/logs', async (req, res) => {
-    const client = clientManager.clients.get(req.params.clientId);
-    if (!client) {
-        return res.status(404).json({ error: '客户端不存在或离线' });
+    const clientInfo = getClientInfoById(req.params.clientId);
+    if (!clientInfo.exists) {
+        return res.status(404).json({ error: '客户端不存在' });
     }
     try {
-        const allFiles = await alistClient.listFiles(client.logDir);
-        const clientFiles = allFiles.filter(file => file.filename.startsWith(client.ip + '_'));
+        const allFiles = await alistClient.listFiles(clientInfo.logDir);
+        const clientFiles = allFiles.filter(file => file.filename.startsWith(clientInfo.ip + '_'));
         res.json(clientFiles);
     } catch (e) {
         console.error('获取日志列表失败:', e);
@@ -742,27 +791,29 @@ app.get('/api/clients/:clientId/logs', async (req, res) => {
     }
 });
 
+// 日志内容 API（返回 JSON 格式，支持离线）
 app.get('/api/clients/:clientId/logs/:filename', async (req, res) => {
-    const client = clientManager.clients.get(req.params.clientId);
-    if (!client) {
-        return res.status(404).json({ error: '客户端不存在或离线' });
+    const clientInfo = getClientInfoById(req.params.clientId);
+    if (!clientInfo.exists) {
+        return res.status(404).json({ error: '客户端不存在' });
     }
-    const filePath = `${client.logDir}/${req.params.filename}`;
+    const filePath = `${clientInfo.logDir}/${req.params.filename}`;
     try {
         const content = await alistClient.readFile(filePath);
         res.json({ content });
     } catch (e) {
         console.error('读取文件失败:', e);
-        res.status(404).json({ error: '文件不存在或无法读取' });
+        res.status(500).json({ error: '文件读取失败', details: e.message });
     }
 });
 
+// 日志下载 API（无需修改，但同样支持离线）
 app.get('/api/clients/:clientId/logs/:filename/download', async (req, res) => {
-    const client = clientManager.clients.get(req.params.clientId);
-    if (!client) {
-        return res.status(404).json({ error: '客户端不存在或离线' });
+    const clientInfo = getClientInfoById(req.params.clientId);
+    if (!clientInfo.exists) {
+        return res.status(404).json({ error: '客户端不存在' });
     }
-    const filePath = `${client.logDir}/${req.params.filename}`;
+    const filePath = `${clientInfo.logDir}/${req.params.filename}`;
     try {
         await alistClient.downloadFile(filePath, res);
     } catch (e) {
@@ -772,22 +823,24 @@ app.get('/api/clients/:clientId/logs/:filename/download', async (req, res) => {
         }
     }
 });
-//读取返回的内容
+
+// 日志 raw 内容 API（返回纯文本，支持离线）
 app.get('/api/clients/:clientId/logs/:filename/raw', async (req, res) => {
-    const client = clientManager.clients.get(req.params.clientId);
-    if (!client) {
-        return res.status(404).send('客户端不存在或离线');
+    const clientInfo = getClientInfoById(req.params.clientId);
+    if (!clientInfo.exists) {
+        return res.status(404).send('客户端不存在');
     }
-    const filePath = `${client.logDir}/${req.params.filename}`;
+    const filePath = `${clientInfo.logDir}/${req.params.filename}`;
     try {
         const content = await alistClient.readFile(filePath);
         res.type('text/plain').send(content);
     } catch (e) {
         console.error('读取文件失败:', e);
-        res.status(404).send('文件不存在或无法读取');
+        res.status(500).send('文件读取失败: ' + e.message);
     }
 });
 
+// 日志上传 API
 app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: '10mb' }), async (req, res) => {
     const ip = req.params.ip;
     const clientId = Array.from(clientManager.clients.keys()).find(id => id.startsWith(ip));
@@ -805,7 +858,7 @@ app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: '10mb' }), 
     }
 });
 
-//启动服务
+// 启动服务
 const PORT = parseInt(process.env.PORT) || 3232;
 server.listen(PORT, () => {
     console.log(`HTTP 服务运行在端口 ${PORT}`);
