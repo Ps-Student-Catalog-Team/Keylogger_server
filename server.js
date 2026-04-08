@@ -204,11 +204,19 @@ async function loadKnownClientsFromDB() {
     let connection;
     try {
         connection = await pool.getConnection();
-        const [rows] = await connection.execute('SELECT ip, port FROM known_clients');
-        return rows.map(row => `${row.ip}:${row.port}`);
+        const [rows] = await connection.execute('SELECT id, ip, port, last_seen FROM known_clients');
+        const clientsMap = new Map();
+        rows.forEach(row => {
+            clientsMap.set(row.id, {
+                ip: row.ip,
+                port: row.port,
+                lastSeen: row.last_seen ? new Date(row.last_seen) : null
+            });
+        });
+        return clientsMap;
     } catch (error) {
         console.error('加载已知客户端失败:', error);
-        return [];
+        return new Map();
     } finally {
         if (connection) connection.release();
     }
@@ -239,9 +247,10 @@ async function updateLastSeen(clientId) {
     let connection;
     try {
         connection = await pool.getConnection();
+        const now = Date.now();
         await connection.execute(
             'UPDATE known_clients SET last_seen = ? WHERE id = ?',
-            [Date.now(), clientId]
+            [now, clientId]
         );
     } catch (error) {
         console.error('更新最后在线时间失败:', error);
@@ -250,13 +259,13 @@ async function updateLastSeen(clientId) {
     }
 }
 
-// ==================== ClientManager（被动监听 + 主动扫描） ====================
+// ==================== ClientManager ====================
 const TCP_LISTEN_PORT = parseInt(process.env.TCP_PORT) || 9999;
 
 class ClientManager {
     constructor() {
-        this.clients = new Map();
-        this.knownClients = new Set();
+        this.clients = new Map();               // 在线客户端
+        this.knownClients = new Map();          // 已知客户端详细信息 (id -> {ip, port, lastSeen})
         this.webClients = new Set();
         this.heartbeatInterval = 30000;
         this.tcpServer = null;
@@ -266,9 +275,8 @@ class ClientManager {
 
     async init() {
         await initDatabase();
-        const ids = await loadKnownClientsFromDB();
-        ids.forEach(id => this.knownClients.add(id));
-        console.log(`从数据库加载了 ${ids.length} 个已知客户端`);
+        this.knownClients = await loadKnownClientsFromDB();
+        console.log(`从数据库加载了 ${this.knownClients.size} 个已知客户端`);
 
         this.startTcpServer();
         this.startHeartbeat();
@@ -302,7 +310,11 @@ class ClientManager {
             }
 
             this.clients.set(clientId, client);
-            this.knownClients.add(clientId);
+            this.knownClients.set(clientId, {
+                ip: remoteAddress,
+                port: remotePort,
+                lastSeen: new Date()
+            });
             saveKnownClientToDB(clientId, remoteAddress, remotePort).catch(e => console.error(e));
 
             this.setupSocketListeners(client);
@@ -338,12 +350,25 @@ class ClientManager {
         client.socket.on('close', () => {
             console.log(`客户端 ${client.id} 连接断开`);
             client.status = 'offline';
+            // 更新最后在线时间
+            const now = new Date();
+            client.lastSeen = now;
+            if (this.knownClients.has(client.id)) {
+                this.knownClients.get(client.id).lastSeen = now;
+            }
+            updateLastSeen(client.id).catch(e => console.error(e));
             this.broadcastToWeb({ type: 'client_offline', clientId: client.id });
         });
 
         client.socket.on('error', (err) => {
             console.error(`客户端 ${client.id} 错误:`, err.message);
             client.status = 'offline';
+            const now = new Date();
+            client.lastSeen = now;
+            if (this.knownClients.has(client.id)) {
+                this.knownClients.get(client.id).lastSeen = now;
+            }
+            updateLastSeen(client.id).catch(e => console.error(e));
             this.broadcastToWeb({ type: 'client_offline', clientId: client.id });
         });
     }
@@ -406,11 +431,23 @@ class ClientManager {
                         if (!result.success) {
                             console.log(`心跳失败: ${clientId}`);
                             client.status = 'offline';
+                            const now = new Date();
+                            client.lastSeen = now;
+                            if (this.knownClients.has(clientId)) {
+                                this.knownClients.get(clientId).lastSeen = now;
+                            }
+                            updateLastSeen(clientId).catch(e => console.error(e));
                             this.broadcastToWeb({ type: 'client_offline', clientId });
                         }
                     } catch (e) {
                         console.log(`心跳异常: ${clientId}`, e.message);
                         client.status = 'offline';
+                        const now = new Date();
+                        client.lastSeen = now;
+                        if (this.knownClients.has(clientId)) {
+                            this.knownClients.get(clientId).lastSeen = now;
+                        }
+                        updateLastSeen(clientId).catch(e => console.error(e));
                         this.broadcastToWeb({ type: 'client_offline', clientId });
                     }
                 }
@@ -432,20 +469,21 @@ class ClientManager {
 
     getAllClients() {
         const allClients = [];
+        // 在线客户端
         for (const client of this.clients.values()) {
             allClients.push(this.getClientInfo(client));
         }
-        for (const clientId of this.knownClients) {
+        // 离线但已知的客户端
+        for (const [clientId, info] of this.knownClients.entries()) {
             if (!this.clients.has(clientId)) {
-                const [ip, port] = clientId.split(':');
                 allClients.push({
                     id: clientId,
-                    ip,
-                    port: parseInt(port),
+                    ip: info.ip,
+                    port: info.port,
                     status: 'offline',
                     recording: false,
                     uploadEnabled: false,
-                    lastSeen: null
+                    lastSeen: info.lastSeen
                 });
             }
         }
@@ -481,7 +519,6 @@ class ClientManager {
             throw new Error('IP 地址格式错误');
         }
 
-        // 将 IP 转为 32 位整数便于遍历
         const ipToInt = (ip) => {
             const parts = ip.split('.').map(Number);
             return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
@@ -502,10 +539,7 @@ class ClientManager {
         console.log(`开始扫描网络: ${startIp} - ${endIp}, 端口: ${ports.join(',')}`);
 
         const foundClients = [];
-        const concurrency = 100; // 并发连接数
-        let current = 0;
-
-        // 分批处理
+        const concurrency = 1000;//并行扫描数量
         const ipList = [];
         for (let i = 0; i < total; i++) {
             ipList.push(intToIp(startInt + i));
@@ -516,12 +550,11 @@ class ClientManager {
                 const client = await this.tryConnect(ip, port);
                 if (client) {
                     foundClients.push(client);
-                    break; // 找到一个端口即可
+                    break;
                 }
             }
         };
 
-        // 并发控制
         const tasks = [];
         for (const ip of ipList) {
             tasks.push(scanIp(ip));
@@ -539,7 +572,7 @@ class ClientManager {
         return new Promise((resolve) => {
             const cleanIp = ip.split('/')[0];
             const socket = new net.Socket();
-            const timeout = 3000; // 3秒超时
+            const timeout = 3000;
             let resolved = false;
 
             const cleanup = () => {
@@ -552,13 +585,11 @@ class ClientManager {
 
             socket.setTimeout(timeout);
             socket.connect(port, cleanIp, () => {
-                // 连接成功，尝试发送一个简单的 ping 验证是否为我们的客户端
                 socket.write(JSON.stringify({ action: 'ping' }) + '\n', (err) => {
                     if (err) {
                         cleanup();
                         return;
                     }
-                    // 等待一个简短响应
                     const responseTimeout = setTimeout(() => {
                         cleanup();
                     }, 2000);
@@ -569,8 +600,8 @@ class ClientManager {
                             const msg = JSON.parse(data.toString().split('\n')[0]);
                             if (msg.status === 'ok' || msg.action === 'pong') {
                                 const clientId = `${cleanIp}:${port}`;
-                                // 检查是否已存在连接
                                 let client = this.clients.get(clientId);
+                                const now = new Date();
                                 if (!client) {
                                     client = {
                                         id: clientId,
@@ -580,20 +611,24 @@ class ClientManager {
                                         status: 'online',
                                         recording: true,
                                         uploadEnabled: false,
-                                        lastSeen: new Date(),
+                                        lastSeen: now,
                                         logDir: alistClient.basePath,
                                         shouldReconnect: false
                                     };
                                     this.clients.set(clientId, client);
-                                    this.knownClients.add(clientId);
+                                    this.knownClients.set(clientId, { ip: cleanIp, port, lastSeen: now });
                                     saveKnownClientToDB(clientId, cleanIp, port).catch(e => console.error(e));
                                     this.setupSocketListeners(client);
                                     this.broadcastToWeb({ type: 'client_connected', client: this.getClientInfo(client) });
                                 } else {
-                                    // 替换旧 socket
                                     client.socket.destroy();
                                     client.socket = socket;
                                     client.status = 'online';
+                                    client.lastSeen = now;
+                                    if (this.knownClients.has(clientId)) {
+                                        this.knownClients.get(clientId).lastSeen = now;
+                                    }
+                                    updateLastSeen(clientId).catch(e => console.error(e));
                                     this.setupSocketListeners(client);
                                 }
                                 resolved = true;
@@ -699,7 +734,6 @@ app.get('/api/clients/:clientId/logs', async (req, res) => {
     }
     try {
         const allFiles = await alistClient.listFiles(client.logDir);
-        // 过滤出该 IP 的日志文件
         const clientFiles = allFiles.filter(file => file.filename.startsWith(client.ip + '_'));
         res.json(clientFiles);
     } catch (e) {
