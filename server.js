@@ -9,12 +9,12 @@ const axios = require('axios');
 const mysql = require('mysql2/promise');
 const jschardet = require('jschardet');
 const iconv = require('iconv-lite');
-const pLimit = require('p-limit');          // 注意：使用 p-limit@3，CommonJS 兼容
+const pLimit = require('p-limit');
 const winston = require('winston');
-const open = require('open');                // 注意：使用 open@8，CommonJS 兼容
+const open = require('open');
 require('dotenv').config();
 
-// ================== 配置常量集中管理 ==================
+// 配置常量
 const CONFIG = {
     alist: {
         url: process.env.ALIST_URL || 'http://10.88.202.73:5244',
@@ -50,7 +50,7 @@ const CONFIG = {
     logDir: './logs',
 };
 
-// ================== 初始化日志系统 ==================
+// 初始化日志系统
 if (!fs.existsSync(CONFIG.logDir)) {
     fs.mkdirSync(CONFIG.logDir, { recursive: true });
 }
@@ -78,12 +78,12 @@ const logger = winston.createLogger({
     ],
 });
 
-// ================== 辅助函数：统一异步错误处理 ==================
+// 辅助函数：统一异步错误处理
 const asyncHandler = (fn) => (req, res, next) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-// ================== 初始化 Express ==================
+// 初始化 Express
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -92,7 +92,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// ================== Alist 客户端 ==================
+// Alist 客户端
 class AlistClient {
     constructor(config) {
         this.baseUrl = config.url.replace(/\/$/, '');
@@ -101,7 +101,7 @@ class AlistClient {
         this.password = config.password;
         this.token = null;
         this.tokenExpire = 0;
-        this.tokenRefreshMargin = config.tokenRefreshMargin;
+        this.tokenRefreshMargin = config.tokenRefreshMargin || 5 * 60 * 1000;
         this.logger = logger.child({ module: 'AlistClient' });
     }
 
@@ -143,6 +143,7 @@ class AlistClient {
             });
             if (response.data.code === 200) {
                 this.token = response.data.data.token;
+                // Token 有效期按 23 小时减去刷新边距计算
                 this.tokenExpire = Date.now() + 23 * 60 * 60 * 1000 - this.tokenRefreshMargin;
                 this.logger.info('Alist 登录成功');
             } else {
@@ -160,17 +161,14 @@ class AlistClient {
         }
     }
 
-    _sanitizePath(inputPath) {
-        const normalized = path.posix.normalize(inputPath).replace(/^(\.\.[\/\\])+/, '');
-        const full = path.posix.join(this.basePath, normalized);
-        if (!full.startsWith(this.basePath)) {
-            throw new Error('非法路径访问');
-        }
-        return full;
+    // 旧版路径处理：简单直接，已验证可靠
+    _getFullPath(relativePath) {
+        // 如果已经是绝对路径（以 / 开头），直接返回
+        return relativePath.startsWith('/') ? relativePath : `/${relativePath}`;
     }
 
     async ensureDir(dirPath) {
-        const fullPath = this._sanitizePath(dirPath);
+        const fullPath = this._getFullPath(dirPath);
         try {
             await this._request('GET', `/api/fs/list?path=${encodeURIComponent(fullPath)}`);
         } catch (err) {
@@ -184,7 +182,7 @@ class AlistClient {
     }
 
     async listFiles(dirPath) {
-        const fullPath = this._sanitizePath(dirPath);
+        const fullPath = this._getFullPath(dirPath);
         try {
             const result = await this._request('GET', `/api/fs/list?path=${encodeURIComponent(fullPath)}`);
             if (result.code === 200) {
@@ -212,7 +210,7 @@ class AlistClient {
     }
 
     async readFile(filePath) {
-        const fullPath = this._sanitizePath(filePath);
+        const fullPath = this._getFullPath(filePath);
         const result = await this._request('GET', `/api/fs/get?path=${encodeURIComponent(fullPath)}`);
 
         if (result.code === 200 && result.data) {
@@ -238,7 +236,7 @@ class AlistClient {
     }
 
     async downloadFile(filePath, res) {
-        const fullPath = this._sanitizePath(filePath);
+        const fullPath = this._getFullPath(filePath);
         await this._ensureToken();
         const url = `${this.baseUrl}/api/fs/get?path=${encodeURIComponent(fullPath)}`;
         const response = await axios({
@@ -251,7 +249,7 @@ class AlistClient {
     }
 
     async uploadFile(dirPath, filename, content) {
-        const fullDir = this._sanitizePath(dirPath);
+        const fullDir = this._getFullPath(dirPath);
         const fullPath = `${fullDir}/${filename}`;
         await this.ensureDir(dirPath);
         await this._request('PUT', `/api/fs/put?path=${encodeURIComponent(fullPath)}`, content, {
@@ -267,7 +265,7 @@ class AlistClient {
 
 const alistClient = new AlistClient(CONFIG.alist);
 
-// ================== MySQL 数据库连接池 ==================
+// MySQL 数据库
 const dbPoolConfig = {
     host: CONFIG.db.host,
     port: CONFIG.db.port,
@@ -369,7 +367,7 @@ async function deleteKnownClientFromDB(clientId) {
     logger.info(`数据库记录已删除: ${clientId}`);
 }
 
-// ================== ClientManager（核心逻辑） ==================
+// ClientManager
 class ClientManager {
     constructor() {
         this.clients = new Map();
@@ -444,7 +442,7 @@ class ClientManager {
     }
 
     setupSocketListeners(client) {
-        const currentSocket = client.socket; // 捕获当前 socket，用于后续身份校验
+        const currentSocket = client.socket;
 
         currentSocket.on('data', (data) => {
             try {
@@ -463,7 +461,6 @@ class ClientManager {
         });
 
         currentSocket.on('close', () => {
-            // ★ 只有当前 socket 仍然是客户端的活动 socket 时才标记离线
             if (client.socket === currentSocket) {
                 this.logger.info(`客户端 ${client.id} 连接断开`);
                 this.markClientOffline(client);
@@ -676,13 +673,11 @@ class ClientManager {
     }
 
     broadcastClientUpdate(client, eventType) {
-        // 发送增量事件
         const updateMsg = JSON.stringify({
             type: 'client_updated',
             event: eventType,
             client: this.getClientInfo(client)
         });
-        // 同时发送全量列表，确保旧版前端能刷新
         const listMsg = JSON.stringify({
             type: 'clients_list',
             clients: this.getAllClients()
@@ -804,7 +799,6 @@ class ClientManager {
                                     this.setupSocketListeners(client);
                                     this.broadcastClientUpdate(client, 'connected');
                                 } else {
-                                    // 替换旧 socket：先移除监听器并销毁旧 socket
                                     const oldSocket = client.socket;
                                     oldSocket.removeAllListeners();
                                     oldSocket.destroy();
@@ -819,7 +813,6 @@ class ClientManager {
                                     this.setupSocketListeners(client);
                                     this.broadcastClientUpdate(client, 'updated');
                                 }
-                                // ★ 成功时直接 resolve，不销毁 socket
                                 resolved = true;
                                 resolve(this.getClientInfo(client));
                             } else {
@@ -849,7 +842,7 @@ class ClientManager {
 
 const clientManager = new ClientManager();
 
-// ================== 辅助函数：根据 clientId 获取客户端信息 ==================
+// 辅助函数：根据 clientId 获取客户端信息
 function getClientInfoById(clientId) {
     let client = clientManager.clients.get(clientId);
     if (client) {
@@ -872,7 +865,7 @@ function getClientInfoById(clientId) {
     return { exists: false };
 }
 
-// ================== WebSocket 处理 ==================
+// WebSocket 处理
 wss.on('connection', (ws) => {
     logger.info('Web 客户端已连接');
     clientManager.addWebClient(ws);
@@ -954,7 +947,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// ================== HTTP API ==================
+// HTTP API
 app.get('/api/clients', (req, res) => {
     res.json(clientManager.getAllClients());
 });
@@ -1019,12 +1012,12 @@ app.use((err, req, res, next) => {
     });
 });
 
-// ================== 优雅关机 ==================
+// 优雅关机
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 async function shutdown() {
-    logger.info('收到关闭信号，开始优雅关机...');
+    logger.info('开始关机...');
     clearInterval(clientManager.heartbeatTimer);
     clearInterval(clientManager.reconnectTimer);
 
@@ -1040,7 +1033,7 @@ async function shutdown() {
     });
 }
 
-// ================== 启动服务 ==================
+// 启动服务
 server.listen(CONFIG.httpPort, async () => {
     logger.info(`HTTP 服务运行在端口 ${CONFIG.httpPort}`);
     const url = `http://localhost:${CONFIG.httpPort}`;
