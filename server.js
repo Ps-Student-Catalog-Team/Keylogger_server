@@ -19,8 +19,8 @@ const CONFIG = {
     alist: {
         url: process.env.ALIST_URL || 'http://10.88.202.73:5244',
         basePath: process.env.ALIST_BASE_PATH || '/学生目录/log',
-        username: process.env.ALIST_USERNAME || 'admin',
-        password: process.env.ALIST_PASSWORD || 'adm1n5',
+        username: process.env.ALIST_USERNAME || 'keylogger_server',
+        password: process.env.ALIST_PASSWORD || '114514',
         tokenRefreshMargin: 5 * 60 * 1000,
     },
     db: {
@@ -30,7 +30,7 @@ const CONFIG = {
         password: process.env.DB_PASSWORD || '',
         database: process.env.DB_NAME || 'client_logs',
         charset: 'utf8mb4',
-        connectionLimit: 10,
+        connectionLimit:100,
         queueLimit: 0,
         enableKeepAlive: true,
         keepAliveInitialDelay: 10000,
@@ -1012,7 +1012,7 @@ app.use((err, req, res, next) => {
     });
 });
 
-// 优雅关机
+// 关机
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
