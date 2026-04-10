@@ -14,17 +14,15 @@ const winston = require('winston');
 const open = require('open');
 require('dotenv').config();
 
-//配置常量
+// 配置常量
 const CONFIG = {
-    // Alist 连接配置
     alist: {
         url: process.env.ALIST_URL || 'http://10.88.202.73:5244',
         basePath: process.env.ALIST_BASE_PATH || '/学生目录/log',
         username: process.env.ALIST_USERNAME || 'admin',
         password: process.env.ALIST_PASSWORD || 'adm1n5',
-        tokenRefreshMargin: 5 * 60 * 1000,      // token 提前5分钟刷新
+        tokenRefreshMargin: 5 * 60 * 1000,
     },
-    // 数据库配置
     db: {
         host: process.env.DB_HOST || 'localhost',
         port: parseInt(process.env.DB_PORT) || 3306,
@@ -36,30 +34,23 @@ const CONFIG = {
         queueLimit: 0,
         enableKeepAlive: true,
         keepAliveInitialDelay: 10000,
-        // 查询重试配置
         maxRetries: 3,
         retryDelay: 1000,
     },
-    // TCP 服务器配置
     tcpPort: parseInt(process.env.TCP_PORT) || 9999,
-    // HTTP 服务端口
     httpPort: parseInt(process.env.PORT) || 3232,
-    // 心跳与重连
     heartbeatInterval: 30000,
-    reconnectInterval: 60000,           // 定时重连间隔
-    reconnectTimeout: 3000,             // 单次连接超时
-    maxConcurrentReconnects: 10,        // 防止重连风暴
-    // 扫描配置
-    scanConcurrency: 200,               // 降低并发避免阻塞
+    reconnectInterval: 60000,
+    reconnectTimeout: 3000,
+    maxConcurrentReconnects: 10,
+    scanConcurrency: 200,
     scanPorts: [9999],
     scanTimeout: 3000,
-    // 文件上传限制
     uploadSizeLimit: '10mb',
-    // 日志保留
     logDir: './logs',
 };
 
-//初始化日志系统
+// 初始化日志系统
 if (!fs.existsSync(CONFIG.logDir)) {
     fs.mkdirSync(CONFIG.logDir, { recursive: true });
 }
@@ -91,7 +82,7 @@ const asyncHandler = (fn) => (req, res, next) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-//初始化 Express
+// 初始化 Express
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -100,7 +91,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-//Alist 客户端（优化 token 刷新和错误重试）
+// Alist 客户端
 class AlistClient {
     constructor(config) {
         this.baseUrl = config.url.replace(/\/$/, '');
@@ -161,7 +152,6 @@ class AlistClient {
             throw error;
         }
     }
-    
 
     async _ensureToken() {
         if (!this.token || Date.now() >= this.tokenExpire) {
@@ -169,11 +159,8 @@ class AlistClient {
         }
     }
 
-    // 路径安全校验：防止路径遍历攻击
     _sanitizePath(inputPath) {
-        // 移除可能的 ../
         const normalized = path.posix.normalize(inputPath).replace(/^(\.\.[\/\\])+/, '');
-        // 确保路径以 basePath 开头
         const full = path.posix.join(this.basePath, normalized);
         if (!full.startsWith(this.basePath)) {
             throw new Error('非法路径访问');
@@ -279,7 +266,7 @@ class AlistClient {
 
 const alistClient = new AlistClient(CONFIG.alist);
 
-//MySQL 数据库
+// MySQL 数据库连接池
 const dbPoolConfig = {
     host: CONFIG.db.host,
     port: CONFIG.db.port,
@@ -307,7 +294,6 @@ async function executeWithRetry(sql, params, retries = CONFIG.db.maxRetries) {
         } catch (error) {
             lastError = error;
             logger.warn(`数据库查询失败 (尝试 ${i + 1}/${retries}): ${error.message}`);
-            // 如果是连接丢失错误，等待后重试
             if (error.code === 'PROTOCOL_CONNECTION_LOST' || error.code === 'ECONNREFUSED' || error.fatal) {
                 await new Promise(resolve => setTimeout(resolve, CONFIG.db.retryDelay));
                 continue;
@@ -383,16 +369,16 @@ async function deleteKnownClientFromDB(clientId) {
     logger.info(`数据库记录已删除: ${clientId}`);
 }
 
-//ClientManager
+// ClientManager
 class ClientManager {
     constructor() {
-        this.clients = new Map();               // 在线客户端
-        this.knownClients = new Map();          // 已知客户端详细信息
+        this.clients = new Map();
+        this.knownClients = new Map();
         this.webClients = new Set();
         this.tcpServer = null;
         this.heartbeatTimer = null;
         this.reconnectTimer = null;
-        this.reconnectQueue = new Set();        // 防止并发重连同一个客户端
+        this.reconnectQueue = new Set();
         this.reconnectLimit = pLimit(CONFIG.maxConcurrentReconnects);
         this.logger = logger.child({ module: 'ClientManager' });
 
@@ -554,7 +540,6 @@ class ClientManager {
                         if (!result.success) {
                             this.logger.warn(`心跳失败: ${clientId}`);
                             this.markClientOffline(client);
-                            // 立即尝试重连一次
                             this.reconnectSingleClient(clientId).catch(e => this.logger.error(e));
                         }
                     } catch (e) {
@@ -594,13 +579,11 @@ class ClientManager {
                 offlineList.push(clientId);
             }
         }
-        // 使用并发限制进行重连
         const tasks = offlineList.map(clientId => this.reconnectLimit(() => this.reconnectSingleClient(clientId)));
         await Promise.allSettled(tasks);
     }
 
     async reconnectSingleClient(clientId) {
-        // 防止并发重连同一客户端
         if (this.reconnectQueue.has(clientId)) {
             return;
         }
@@ -626,17 +609,13 @@ class ClientManager {
     }
 
     async deleteKnownClient(clientId) {
-        // 1. 断开连接
         const client = this.clients.get(clientId);
         if (client) {
             client.socket.destroy();
             this.clients.delete(clientId);
         }
-        // 2. 从内存删除
         this.knownClients.delete(clientId);
-        // 3. 从数据库删除
         await deleteKnownClientFromDB(clientId);
-        // 4. 通知前端
         this.broadcastToWeb({
             type: 'client_deleted',
             clientId: clientId
@@ -679,7 +658,6 @@ class ClientManager {
 
     addWebClient(ws) {
         this.webClients.add(ws);
-        // 首次连接发送全量列表
         ws.send(JSON.stringify({
             type: 'clients_list',
             clients: this.getAllClients()
@@ -690,7 +668,6 @@ class ClientManager {
         this.webClients.delete(ws);
     }
 
-    // 广播增量更新（优先使用 client_updated 事件）
     broadcastClientUpdate(client, eventType) {
         const message = JSON.stringify({
             type: 'client_updated',
@@ -826,7 +803,9 @@ class ClientManager {
                                     this.setupSocketListeners(client);
                                     this.broadcastClientUpdate(client, 'updated');
                                 }
-                                cleanup(this.getClientInfo(client));
+                                // ===== 修复点：成功时不调用 cleanup，直接 resolve，防止 socket 被销毁 =====
+                                resolved = true;
+                                resolve(this.getClientInfo(client));
                             } else {
                                 cleanup(null);
                             }
@@ -840,7 +819,9 @@ class ClientManager {
             socket.on('error', () => cleanup(null));
             socket.on('timeout', () => cleanup(null));
             socket.on('close', () => {
-                if (!resolved) cleanup(null);
+                if (!resolved) {
+                    cleanup(null);
+                }
             });
         });
     }
@@ -852,7 +833,7 @@ class ClientManager {
 
 const clientManager = new ClientManager();
 
-//辅助函数：获取客户端信息
+// 辅助函数：获取客户端信息
 function getClientInfoById(clientId) {
     let client = clientManager.clients.get(clientId);
     if (client) {
@@ -875,7 +856,7 @@ function getClientInfoById(clientId) {
     return { exists: false };
 }
 
-//WebSocket 处理
+// WebSocket 处理
 wss.on('connection', (ws) => {
     logger.info('Web 客户端已连接');
     clientManager.addWebClient(ws);
@@ -957,7 +938,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-//HTTP API（统一错误处理）
+// HTTP API
 app.get('/api/clients', (req, res) => {
     res.json(clientManager.getAllClients());
 });
@@ -1030,29 +1011,24 @@ async function shutdown() {
     clearInterval(clientManager.heartbeatTimer);
     clearInterval(clientManager.reconnectTimer);
 
-    // 关闭 TCP 服务器
     if (clientManager.tcpServer) {
         clientManager.tcpServer.close();
     }
-    // 关闭 WebSocket 连接
     wss.clients.forEach(ws => ws.terminate());
-    // 关闭 HTTP 服务器
     server.close(async () => {
         logger.info('HTTP 服务器已关闭');
-        // 关闭数据库连接池
         await pool.end();
         logger.info('数据库连接池已关闭');
         process.exit(0);
     });
 }
 
-//启动服务
+// 启动服务
 server.listen(CONFIG.httpPort, async () => {
     logger.info(`HTTP 服务运行在端口 ${CONFIG.httpPort}`);
     const url = `http://localhost:${CONFIG.httpPort}`;
     logger.info(`访问 ${url} 打开管理界面`);
 
-    // 自动打开浏览器
     if (process.env.NODE_ENV !== 'production') {
         try {
             await open(url);
