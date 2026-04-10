@@ -4,6 +4,8 @@ let clients = [];
 let currentClientId = null;
 let reconnectTimer = null;
 const WS_URL = `ws://${window.location.host}`;
+let autoRefreshTimer = null;
+const AUTO_REFRESH_INTERVAL = 1000; // 1秒
 
 // DOM 元素
 const wsStatus = document.getElementById('wsStatus');
@@ -24,6 +26,10 @@ document.querySelectorAll('.nav-item').forEach(item => {
         document.getElementById(page + 'Page').style.display = 'block';
         if (page === 'logs') {
             populateClientSelect();
+            if (logClientSelect.value) refreshLogs();
+            startAutoRefresh();
+        } else {
+            stopAutoRefresh();
         }
     });
 });
@@ -477,7 +483,13 @@ function showToast(message, type = 'success') {
 }
 
 // 日志页面客户端选择变化
-logClientSelect.addEventListener('change', refreshLogs);
+logClientSelect.addEventListener('change', () => {
+    refreshLogs();
+    if (autoRefreshTimer) {
+        stopAutoRefresh();
+        startAutoRefresh();
+    }
+});
 
 // 日志搜索过滤
 document.getElementById('logSearch')?.addEventListener('input', (e) => {
@@ -487,6 +499,28 @@ document.getElementById('logSearch')?.addEventListener('input', (e) => {
         const text = row.textContent.toLowerCase();
         row.style.display = text.includes(keyword) ? '' : 'none';
     });
+});
+
+//自动刷新
+function startAutoRefresh() {
+    if (autoRefreshTimer) return;
+    autoRefreshTimer = setInterval(() => {
+        if (logClientSelect.value) {
+            refreshLogs();
+        }
+    }, AUTO_REFRESH_INTERVAL);
+}
+
+function stopAutoRefresh() {
+    if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+    }
+}
+
+// 页面关闭前清理定时器
+window.addEventListener('beforeunload', () => {
+    stopAutoRefresh();
 });
 
 // 初始化连接
