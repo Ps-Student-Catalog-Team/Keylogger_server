@@ -3,18 +3,32 @@ let ws = null;
 let clients = [];
 let currentClientId = null;
 let reconnectTimer = null;
+let reconnectDelay = 1000;
+let toastTimer = null;
 const WS_URL = `ws://${window.location.host}`;
 let autoRefreshTimer = null;
 const AUTO_REFRESH_INTERVAL = 1000; // 1秒
+const MAX_RECONNECT_DELAY = 30000;
 
 // DOM 元素
-const wsStatus = document.getElementById('wsStatus');
-const wsStatusText = document.getElementById('wsStatusText');
-const clientsTable = document.getElementById('clientsTable');
-const logClientSelect = document.getElementById('logClientSelect');
-const logsTable = document.getElementById('logsTable');
-const scanProgress = document.getElementById('scanProgress');
-const toast = document.getElementById('toast');
+const dom = {
+    wsStatus: document.getElementById('wsStatus'),
+    wsStatusText: document.getElementById('wsStatusText'),
+    clientsTable: document.getElementById('clientsTable'),
+    logClientSelect: document.getElementById('logClientSelect'),
+    logsTable: document.getElementById('logsTable'),
+    scanProgress: document.getElementById('scanProgress'),
+    toast: document.getElementById('toast')
+};
+
+function escapeHtml(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
 
 // 页面切换
 document.querySelectorAll('.nav-item').forEach(item => {
@@ -26,7 +40,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
         document.getElementById(page + 'Page').style.display = 'block';
         if (page === 'logs') {
             populateClientSelect();
-            if (logClientSelect.value) refreshLogs();
+            if (dom.logClientSelect.value) refreshLogs();
             startAutoRefresh();
         } else {
             stopAutoRefresh();
@@ -40,19 +54,21 @@ function connectWebSocket() {
 
     ws = new WebSocket(WS_URL);
     ws.onopen = () => {
-        wsStatus.classList.add('connected');
-        wsStatusText.textContent = '已连接';
+        dom.wsStatus.classList.add('connected');
+        dom.wsStatusText.textContent = '已连接';
         if (reconnectTimer) {
             clearTimeout(reconnectTimer);
             reconnectTimer = null;
         }
+        reconnectDelay = 1000;
         showToast('已连接到服务器', 'success');
     };
 
     ws.onclose = () => {
-        wsStatus.classList.remove('connected');
-        wsStatusText.textContent = '断开，尝试重连...';
-        reconnectTimer = setTimeout(connectWebSocket, 3000);
+        dom.wsStatus.classList.remove('connected');
+        dom.wsStatusText.textContent = '断开，尝试重连...';
+        reconnectTimer = setTimeout(connectWebSocket, reconnectDelay);
+        reconnectDelay = Math.min(MAX_RECONNECT_DELAY, reconnectDelay * 1.5);
     };
 
     ws.onerror = (err) => {
@@ -115,11 +131,11 @@ function handleWebSocketMessage(data) {
             showToast(`广播完成: ${successCount}/${data.results.length} 成功`, 'success');
             break;
         case 'scan_complete':
-            scanProgress.classList.remove('show');
+            dom.scanProgress.classList.remove('show');
             showToast(`扫描完成，发现 ${data.found.length} 个客户端`, 'success');
             break;
         case 'scan_error':
-            scanProgress.classList.remove('show');
+            dom.scanProgress.classList.remove('show');
             showToast('扫描失败: ' + data.message, 'error');
             break;
         case 'connect_result':
@@ -162,7 +178,7 @@ function removeClientFromList(clientId) {
 // 渲染客户端表格
 function renderClientsTable() {
     if (clients.length === 0) {
-        clientsTable.innerHTML = '<tr><td colspan="7" class="empty-state">暂无客户端</td></tr>';
+        dom.clientsTable.innerHTML = '<tr><td colspan="7" class="empty-state">暂无客户端</td></tr>';
         return;
     }
 
@@ -172,34 +188,38 @@ function renderClientsTable() {
         const recordClass = client.recording ? 'status-recording' : 'status-paused';
         const uploadClass = client.uploadEnabled ? 'status-recording' : 'status-paused';
         const lastSeen = client.lastSeen ? new Date(client.lastSeen).toLocaleString() : '从未';
+        const safeId = escapeHtml(client.id);
+        const safeIp = escapeHtml(client.ip);
+        const safePort = escapeHtml(client.port);
+        const safeStatus = escapeHtml(client.status);
 
         html += `<tr>
-            <td>${client.ip}</td>
-            <td>${client.port}</td>
-            <td><span class="status-badge ${statusClass}">${client.status}</span></td>
+            <td>${safeIp}</td>
+            <td>${safePort}</td>
+            <td><span class="status-badge ${statusClass}">${safeStatus}</span></td>
             <td><span class="status-badge ${recordClass}">${client.recording ? '录制中' : '已暂停'}</span></td>
             <td><span class="status-badge ${uploadClass}">${client.uploadEnabled ? '已启用' : '未启用'}</span></td>
-            <td>${lastSeen}</td>
+            <td>${escapeHtml(lastSeen)}</td>
             <td>
                 <div class="action-btns">
-                    <button class="btn btn-sm btn-primary" onclick="showClientModal('${client.id}')">详情</button>
+                    <button class="btn btn-sm btn-primary" onclick="showClientModal('${safeId}')">详情</button>
                     ${client.status === 'online' ? 
-                        `<button class="btn btn-sm btn-danger" onclick="disconnectClient('${client.id}')">断开</button>` : ''}
-                    <button class="btn btn-sm btn-danger" onclick="deleteClient('${client.id}')">删除</button>
+                        `<button class="btn btn-sm btn-danger" onclick="disconnectClient('${safeId}')">断开</button>` : ''}
+                    <button class="btn btn-sm btn-danger" onclick="deleteClient('${safeId}')">删除</button>
                 </div>
             </td>
         </tr>`;
     });
-    clientsTable.innerHTML = html;
+    dom.clientsTable.innerHTML = html;
 }
 
 // 填充日志页面的客户端下拉框
 function populateClientSelect() {
     let html = '<option value="">选择客户端</option>';
     clients.forEach(client => {
-        html += `<option value="${client.id}">${client.ip}:${client.port} (${client.status})</option>`;
+        html += `<option value="${escapeHtml(client.id)}">${escapeHtml(client.ip)}:${escapeHtml(client.port)} (${escapeHtml(client.status)})</option>`;
     });
-    logClientSelect.innerHTML = html;
+    dom.logClientSelect.innerHTML = html;
 }
 
 // 显示客户端详情模态框
@@ -212,13 +232,13 @@ function showClientModal(clientId) {
     
     // 概览信息
     const infoHtml = `
-        <p><strong>ID:</strong> ${client.id}</p>
-        <p><strong>IP:</strong> ${client.ip}</p>
-        <p><strong>端口:</strong> ${client.port}</p>
-        <p><strong>状态:</strong> ${client.status}</p>
+        <p><strong>ID:</strong> ${escapeHtml(client.id)}</p>
+        <p><strong>IP:</strong> ${escapeHtml(client.ip)}</p>
+        <p><strong>端口:</strong> ${escapeHtml(client.port)}</p>
+        <p><strong>状态:</strong> ${escapeHtml(client.status)}</p>
         <p><strong>录制状态:</strong> ${client.recording ? '录制中' : '已暂停'}</p>
         <p><strong>上传状态:</strong> ${client.uploadEnabled ? '已启用' : '未启用'}</p>
-        <p><strong>最后连接:</strong> ${client.lastSeen ? new Date(client.lastSeen).toLocaleString() : '从未'}</p>
+        <p><strong>最后连接:</strong> ${escapeHtml(client.lastSeen ? new Date(client.lastSeen).toLocaleString() : '从未')}</p>
     `;
     document.getElementById('clientInfo').innerHTML = infoHtml;
 
@@ -242,12 +262,14 @@ async function loadClientLogs(clientId) {
         }
         let html = '<ul style="list-style: none; padding: 0;">';
         logs.forEach(log => {
-            html += `<li style="padding: 0.5rem; border-bottom: 1px solid #eee; display: flex; justify-content: space-between;">
-                <span>${log.filename}</span>
+            const safeFilename = escapeHtml(log.filename);
+            const safeClientId = escapeHtml(clientId);
+            html += `<li style="padding: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.08); display: flex; justify-content: space-between; align-items: center;">
+                <span>${safeFilename}</span>
                 <div class="action-btns">
-                    <button class="btn btn-sm btn-primary" onclick="viewLog('${clientId}', '${log.filename}')">查看</button>
-                    <button class="btn btn-sm btn-success" onclick="downloadLog('${clientId}', '${log.filename}')">下载</button>
-                    <button class="btn btn-sm btn-danger" onclick="deleteLog('${clientId}', '${log.filename}')">删除</button>
+                    <button class="btn btn-sm btn-primary" onclick="viewLog('${safeClientId}', '${safeFilename}')">查看</button>
+                    <button class="btn btn-sm btn-success" onclick="downloadLog('${safeClientId}', '${safeFilename}')">下载</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteLog('${safeClientId}', '${safeFilename}')">删除</button>
                 </div>
             </li>`;
         });
@@ -351,13 +373,13 @@ function scanNetwork() {
         type: 'scan_network',
         startIp, endIp, ports
     }));
-    scanProgress.classList.add('show');
+    dom.scanProgress.classList.add('show');
     hideModal('scanModal');
 }
 
 // 刷新日志列表（日志页面）
 async function refreshLogs() {
-    const clientId = logClientSelect.value;
+    const clientId = dom.logClientSelect.value;
     if (!clientId) {
         showToast('请选择客户端', 'error');
         return;
@@ -375,7 +397,7 @@ async function refreshLogs() {
 // 渲染日志表格（包含删除按钮）
 function renderLogsTable(logs, clientId) {
     if (logs.length === 0) {
-        logsTable.innerHTML = '<tr><td colspan="4" class="empty-state">暂无日志文件</td></tr>';
+        dom.logsTable.innerHTML = '<tr><td colspan="4" class="empty-state">暂无日志文件</td></tr>';
         return;
     }
     let html = '';
@@ -395,7 +417,7 @@ function renderLogsTable(logs, clientId) {
             </td>
         </tr>`;
     });
-    logsTable.innerHTML = html;
+    dom.logsTable.innerHTML = html;
 }
 
 // 查看日志内容
@@ -434,7 +456,7 @@ async function deleteLog(clientId, filename) {
             if (currentClientId === clientId && document.getElementById('clientModal').classList.contains('show')) {
                 loadClientLogs(clientId);
             }
-            if (logClientSelect.value === clientId) {
+            if (dom.logClientSelect.value === clientId) {
                 refreshLogs();
             }
         } else {
@@ -475,15 +497,19 @@ function saveSettings() {
 
 // Toast 提示
 function showToast(message, type = 'success') {
-    toast.textContent = message;
-    toast.className = `toast ${type} show`;
-    setTimeout(() => {
-        toast.classList.remove('show');
+    dom.toast.textContent = message;
+    dom.toast.className = `toast ${type} show`;
+    if (toastTimer) {
+        clearTimeout(toastTimer);
+    }
+    toastTimer = setTimeout(() => {
+        dom.toast.classList.remove('show');
+        toastTimer = null;
     }, 3000);
 }
 
 // 日志页面客户端选择变化
-logClientSelect.addEventListener('change', () => {
+dom.logClientSelect.addEventListener('change', () => {
     refreshLogs();
     if (autoRefreshTimer) {
         stopAutoRefresh();
@@ -494,7 +520,7 @@ logClientSelect.addEventListener('change', () => {
 // 日志搜索过滤
 document.getElementById('logSearch')?.addEventListener('input', (e) => {
     const keyword = e.target.value.toLowerCase();
-    const rows = logsTable.querySelectorAll('tr');
+    const rows = dom.logsTable.querySelectorAll('tr');
     rows.forEach(row => {
         const text = row.textContent.toLowerCase();
         row.style.display = text.includes(keyword) ? '' : 'none';
@@ -505,7 +531,7 @@ document.getElementById('logSearch')?.addEventListener('input', (e) => {
 function startAutoRefresh() {
     if (autoRefreshTimer) return;
     autoRefreshTimer = setInterval(() => {
-        if (logClientSelect.value) {
+        if (dom.logClientSelect.value) {
             refreshLogs();
         }
     }, AUTO_REFRESH_INTERVAL);

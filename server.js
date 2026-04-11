@@ -12,7 +12,46 @@ const iconv = require('iconv-lite');
 const pLimit = require('p-limit');
 const winston = require('winston');
 const open = require('open');
+const crypto = require('crypto');
 require('dotenv').config();
+
+const AUTH_CONFIG = {
+    password: process.env.WEB_PASSWORD || 'adm1n5',
+    secret: process.env.WEB_AUTH_SECRET || 'keylogger_secret',
+    cookieName: 'keylogger_auth',
+    maxAge: 24 * 60 * 60 * 1000
+};
+
+function parseCookies(cookieHeader = '') {
+    return cookieHeader.split(';').reduce((cookies, cookie) => {
+        const [name, ...rest] = cookie.split('=');
+        if (!name) return cookies;
+        cookies[name.trim()] = rest.join('=').trim();
+        return cookies;
+    }, {});
+}
+
+function createAuthToken() {
+    const expires = Date.now() + AUTH_CONFIG.maxAge;
+    const payload = `${expires}`;
+    const signature = crypto.createHmac('sha256', AUTH_CONFIG.secret).update(payload).digest('hex');
+    return `${payload}.${signature}`;
+}
+
+function verifyAuthToken(token) {
+    if (!token) return false;
+    const [expires, signature] = token.split('.');
+    if (!expires || !signature) return false;
+    const expected = crypto.createHmac('sha256', AUTH_CONFIG.secret).update(expires).digest('hex');
+    try {
+        if (!crypto.timingSafeEqual(Buffer.from(signature, 'utf8'), Buffer.from(expected, 'utf8'))) {
+            return false;
+        }
+    } catch (e) {
+        return false;
+    }
+    return Date.now() <= Number(expires);
+}
 
 // 配置常量
 const CONFIG = {
@@ -90,6 +129,44 @@ const wss = new WebSocket.Server({ server });
 
 app.use(cors());
 app.use(express.json());
+
+function authMiddleware(req, res, next) {
+    const allowedPaths = ['/login', '/login.html', '/api/login'];
+    if (allowedPaths.includes(req.path)) {
+        return next();
+    }
+
+    const cookies = parseCookies(req.headers.cookie || '');
+    if (verifyAuthToken(cookies[AUTH_CONFIG.cookieName])) {
+        return next();
+    }
+
+    if (req.path.startsWith('/api/')) {
+        return res.status(401).json({ error: '未授权' });
+    }
+    return res.redirect('/login');
+}
+
+app.get('/login', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+app.post('/api/login', asyncHandler(async (req, res) => {
+    const { password } = req.body;
+    if (password === AUTH_CONFIG.password) {
+        const token = createAuthToken();
+        res.setHeader('Set-Cookie', `${AUTH_CONFIG.cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${AUTH_CONFIG.maxAge / 1000}`);
+        return res.json({ success: true });
+    }
+    return res.status(401).json({ success: false, error: '密码错误' });
+}));
+
+app.get('/logout', (req, res) => {
+    res.setHeader('Set-Cookie', `${AUTH_CONFIG.cookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+    res.redirect('/login');
+});
+
+app.use(authMiddleware);
 app.use(express.static('public'));
 
 // Alist 客户端
@@ -882,7 +959,14 @@ function getClientInfoById(clientId) {
 }
 
 // WebSocket 处理
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+    const cookies = parseCookies(req.headers.cookie || '');
+    if (!verifyAuthToken(cookies[AUTH_CONFIG.cookieName])) {
+        logger.warn('拒绝未授权的 WebSocket 连接');
+        ws.close(1008, 'Unauthorized');
+        return;
+    }
+
     logger.info('Web 客户端已连接');
     clientManager.addWebClient(ws);
 
