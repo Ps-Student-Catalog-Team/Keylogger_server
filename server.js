@@ -929,8 +929,9 @@ class ClientManager {
     }
 
     manualConnect(ip, port) {
-        return this.tryConnect(ip, port);
-    }
+    // 直接调用 tryConnect，不经过 reconnectSingleClient 的去重逻辑
+    return this.tryConnect(ip, port);
+}
 }
 
 const clientManager = new ClientManager();
@@ -1000,7 +1001,14 @@ wss.on('connection', (ws, req) => {
                 case 'manual_connect':
                     try {
                         const client = await clientManager.manualConnect(data.ip, data.port);
-                        ws.send(JSON.stringify({ type: 'connect_result', client }));
+                        if (client) {
+                            ws.send(JSON.stringify({ type: 'connect_result', client }));
+                        } else {
+                            ws.send(JSON.stringify({ 
+                                type: 'connect_error', 
+                                message: `无法连接到 ${data.ip}:${data.port}，请检查目标主机是否在线且端口可访问` 
+                            }));
+                        }
                     } catch (e) {
                         ws.send(JSON.stringify({ type: 'connect_error', message: e.message }));
                     }

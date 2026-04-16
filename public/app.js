@@ -8,6 +8,7 @@ let toastTimer = null;
 let isUnloading = false;
 let isReconnecting = false;
 let reconnectAttempts = 0;
+let connectingClients = new Set();
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
 let autoRefreshTimer = null;
 const AUTO_REFRESH_INTERVAL = 1000; // 1秒
@@ -165,11 +166,25 @@ function handleWebSocketMessage(data) {
             showToast('扫描失败: ' + data.message, 'error');
             break;
         case 'connect_result':
-            showToast(`成功连接 ${data.client.ip}:${data.client.port}`, 'success');
-            hideModal('connectModal');
+            if (data.client) {
+                showToast(`成功连接 ${data.client.ip}:${data.client.port}`, 'success');
+                hideModal('connectModal');
+                // 移除连接中标记
+                connectingClients.delete(data.client.id);
+                renderClientsTable();
+            } else {
+                showToast('连接失败：服务器无响应', 'error');//直接刷新列表
+            }
             break;
         case 'connect_error':
             showToast('连接失败: ' + data.message, 'error');
+            break;
+            case 'clients_list':
+        clients = data.clients;
+            // 当收到新的客户端列表时，清除所有连接中标记
+            connectingClients.clear();
+            renderClientsTable();
+            populateClientSelect();
             break;
         case 'delete_result':
             if (data.success) {
@@ -202,6 +217,7 @@ function removeClientFromList(clientId) {
 }
 
 // 渲染客户端表格
+// 渲染客户端表格
 function renderClientsTable() {
     if (clients.length === 0) {
         dom.clientsTable.innerHTML = '<tr><td colspan="7" class="empty-state">暂无客户端</td></tr>';
@@ -218,6 +234,22 @@ function renderClientsTable() {
         const safeIp = escapeHtml(client.ip);
         const safePort = escapeHtml(client.port);
         const safeStatus = escapeHtml(client.status);
+        const isConnecting = connectingClients.has(client.id);
+
+        let actionButtons = `
+            <button class="btn btn-sm btn-primary" onclick="showClientModal('${safeId}')">详情</button>
+        `;
+
+        if (client.status === 'online') {
+            actionButtons += `<button class="btn btn-sm btn-warning" onclick="disconnectClient('${safeId}')">断开</button>`;
+        } else {
+            const connectBtnText = isConnecting 
+                ? '<span class="btn-spinner"></span> 连接中' 
+                : '连接';
+            const disabledAttr = isConnecting ? 'disabled' : '';
+            actionButtons += `<button class="btn btn-sm btn-success" onclick="connectClient('${safeIp}', ${safePort}, '${safeId}')" ${disabledAttr}>${connectBtnText}</button>`;
+        }
+        actionButtons += `<button class="btn btn-sm btn-danger" onclick="deleteClient('${safeId}')">删除</button>`;
 
         html += `<tr>
             <td>${safeIp}</td>
@@ -228,10 +260,7 @@ function renderClientsTable() {
             <td>${escapeHtml(lastSeen)}</td>
             <td>
                 <div class="action-btns">
-                    <button class="btn btn-sm btn-primary" onclick="showClientModal('${safeId}')">详情</button>
-                    ${client.status === 'online' ? 
-                        `<button class="btn btn-sm btn-danger" onclick="disconnectClient('${safeId}')">断开</button>` : ''}
-                    <button class="btn btn-sm btn-danger" onclick="deleteClient('${safeId}')">删除</button>
+                    ${actionButtons}
                 </div>
             </td>
         </tr>`;
@@ -371,7 +400,7 @@ function deleteClient(clientId) {
     }
 }
 
-// 手动连接
+// 手动连接（模态框调用）
 function manualConnect() {
     const ip = document.getElementById('connectIp').value;
     const port = parseInt(document.getElementById('connectPort').value);
@@ -383,6 +412,33 @@ function manualConnect() {
         type: 'manual_connect',
         ip, port
     }));
+}
+
+// 连接单个客户端（供按钮调用）
+function connectClient(ip, port) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showToast('WebSocket 未连接', 'error');
+        return;
+    }
+    ws.send(JSON.stringify({
+        type: 'manual_connect',
+        ip,
+        port
+    }));
+    showToast(`正在尝试连接 ${ip}:${port}...`, 'success');
+}
+
+// 一键连接全部离线客户端
+function connectAllClients() {
+    const offlineClients = clients.filter(c => c.status === 'offline');
+    if (offlineClients.length === 0) {
+        showToast('没有离线客户端', 'error');
+        return;
+    }
+    showToast(`正在尝试连接 ${offlineClients.length} 个离线客户端...`, 'success');
+    offlineClients.forEach(client => {
+        connectClient(client.ip, client.port);
+    });
 }
 
 // 扫描网络
@@ -431,14 +487,14 @@ function renderLogsTable(logs, clientId) {
         const size = formatFileSize(log.size);
         const time = log.uploadTime ? new Date(log.uploadTime).toLocaleString() : '未知';
         html += `<tr>
-            <td>${log.filename}</td>
+            <td>${escapeHtml(log.filename)}</td>
             <td>${size}</td>
             <td>${time}</td>
             <td>
                 <div class="action-btns">
-                    <button class="btn btn-sm btn-primary" onclick="viewLog('${clientId}', '${log.filename}')">查看</button>
-                    <button class="btn btn-sm btn-success" onclick="downloadLog('${clientId}', '${log.filename}')">下载</button>
-                    <button class="btn btn-sm btn-danger" onclick="deleteLog('${clientId}', '${log.filename}')">删除</button>
+                    <button class="btn btn-sm btn-primary" onclick="viewLog('${escapeHtml(clientId)}', '${escapeHtml(log.filename)}')">查看</button>
+                    <button class="btn btn-sm btn-success" onclick="downloadLog('${escapeHtml(clientId)}', '${escapeHtml(log.filename)}')">下载</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteLog('${escapeHtml(clientId)}', '${escapeHtml(log.filename)}')">删除</button>
                 </div>
             </td>
         </tr>`;
