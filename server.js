@@ -1163,13 +1163,4 @@ server.listen(CONFIG.httpPort, async () => {
     logger.info(`HTTP 服务运行在端口 ${CONFIG.httpPort}`);
     const url = `http://localhost:${CONFIG.httpPort}/login.html`;
     logger.info(`访问 ${url} 打开管理界面`);
-
-    if (process.env.NODE_ENV !== 'production') {
-        try {
-            await open(url);
-            logger.info('已自动打开浏览器');
-        } catch (err) {
-            logger.warn('自动打开浏览器失败，请手动访问', { error: err.message });
-        }
-    }
 });
