@@ -320,6 +320,40 @@ function showClientModal(clientId) {
     document.getElementById('clientModal').classList.add('show');
 }
 
+// 获取日志文件信息
+function getLogsInfo() {
+    sendCommand('get_logs_info');
+}
+
+// 删除指定日志
+function deleteClientLog(filename) {
+    if (!confirm(`确定要删除日志文件 ${filename} 吗？此操作不可恢复！`)) {
+        return;
+    }
+    sendCommand('delete_log', { file: filename });
+}
+
+// 暂停录制
+function pauseRecord() {
+    sendCommand('pause_record');
+}
+
+// 恢复录制
+function resumeRecord() {
+    sendCommand('resume_record');
+}
+
+// 获取完整状态
+function getStatus() {
+    sendCommand('get_status');
+}
+
+// 立即上传
+function uploadOnce() {
+    const count = parseInt(document.getElementById('uploadCount').value) || 1;
+    sendCommand('upload_once', { count });
+}
+
 // 加载客户端日志
 async function loadClientLogs(clientId) {
     const client = clients.find(c => c.id === clientId);

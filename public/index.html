@@ -547,16 +547,27 @@
                 <div class="form-group">
                     <label>录制控制</label>
                     <div class="action-btns">
-                        <button class="btn btn-warning" onclick="sendCommand('pause_record')">暂停录制</button>
-                        <button class="btn btn-success" onclick="sendCommand('resume_record')">恢复录制</button>
+                        <button class="btn btn-warning" onclick="pauseRecord()">暂停录制</button>
+                        <button class="btn btn-success" onclick="resumeRecord()">恢复录制</button>
                     </div>
                 </div>
                 <div class="form-group">
                     <label>上传控制</label>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <div class="action-btns">
+                            <button class="btn btn-success" onclick="sendCommand('start_upload')">开始上传</button>
+                            <button class="btn btn-danger" onclick="sendCommand('stop_upload')">停止上传</button>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; align-items: center;">
+                            <input type="number" id="uploadCount" value="1" min="1" max="10" style="width: 80px;" placeholder="数量">
+                            <button class="btn btn-primary" onclick="uploadOnce()">立即上传</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>状态管理</label>
                     <div class="action-btns">
-                        <button class="btn btn-success" onclick="sendCommand('start_upload')">开始上传</button>
-                        <button class="btn btn-danger" onclick="sendCommand('stop_upload')">停止上传</button>
-                        <button class="btn btn-primary" onclick="sendCommand('upload_once')">立即上传</button>
+                        <button class="btn btn-primary" onclick="sendCommand('ping')">心跳检测</button>
                     </div>
                 </div>
                 <div class="form-group">

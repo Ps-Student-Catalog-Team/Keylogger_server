@@ -76,14 +76,14 @@ const CONFIG = {
         maxRetries: 3,
         retryDelay: 1000,
     },
-    tcpPort: parseInt(process.env.TCP_PORT) || 9999,
-    httpPort: parseInt(process.env.PORT) || 3232,
+    tcpPort: parseInt(process.env.TCP_PORT) || 9998,
+    httpPort: parseInt(process.env.PORT) || 3233,
     heartbeatInterval: 30000,
     reconnectInterval: 60000,
     reconnectTimeout: 3000,
     maxConcurrentReconnects: 10,
     scanConcurrency: 200,
-    scanPorts: [9999],
+    scanPorts: [9998],
     scanTimeout: 3000,
     uploadSizeLimit: '10mb',
     logDir: './logs',
@@ -421,8 +421,8 @@ async function initDatabase() {
         `);
         logger.info('MySQL 数据库表初始化完成');
     } catch (error) {
-        logger.error('数据库初始化失败，退出进程', { error: error.message });
-        process.exit(1);
+        logger.warn('数据库初始化失败，将在无数据库模式下运行', { error: error.message });
+        // 不退出进程，继续运行
     }
 }
 
@@ -440,35 +440,47 @@ async function loadKnownClientsFromDB() {
         logger.info(`从数据库加载了 ${clientsMap.size} 个已知客户端`);
         return clientsMap;
     } catch (error) {
-        logger.error('加载已知客户端失败', { error: error.message });
+        logger.warn('加载已知客户端失败，返回空列表', { error: error.message });
         return new Map();
     }
 }
 
 async function saveKnownClientToDB(clientId, ip, port) {
-    const now = Date.now();
-    await executeWithRetry(
-        `INSERT INTO known_clients (id, ip, port, last_seen, created_at) 
-         VALUES (?, ?, ?, ?, ?) 
-         ON DUPLICATE KEY UPDATE 
-             ip = VALUES(ip), 
-             port = VALUES(port), 
-             last_seen = VALUES(last_seen)`,
-        [clientId, ip, port, now, now]
-    );
+    try {
+        const now = Date.now();
+        await executeWithRetry(
+            `INSERT INTO known_clients (id, ip, port, last_seen, created_at) 
+             VALUES (?, ?, ?, ?, ?) 
+             ON DUPLICATE KEY UPDATE 
+                 ip = VALUES(ip), 
+                 port = VALUES(port), 
+                 last_seen = VALUES(last_seen)`,
+            [clientId, ip, port, now, now]
+        );
+    } catch (error) {
+        logger.warn('保存客户端到数据库失败', { error: error.message, clientId });
+    }
 }
 
 async function updateLastSeen(clientId) {
-    const now = Date.now();
-    await executeWithRetry(
-        'UPDATE known_clients SET last_seen = ? WHERE id = ?',
-        [now, clientId]
-    );
+    try {
+        const now = Date.now();
+        await executeWithRetry(
+            'UPDATE known_clients SET last_seen = ? WHERE id = ?',
+            [now, clientId]
+        );
+    } catch (error) {
+        logger.warn('更新客户端最后在线时间失败', { error: error.message, clientId });
+    }
 }
 
 async function deleteKnownClientFromDB(clientId) {
-    await executeWithRetry('DELETE FROM known_clients WHERE id = ?', [clientId]);
-    logger.info(`数据库记录已删除: ${clientId}`);
+    try {
+        await executeWithRetry('DELETE FROM known_clients WHERE id = ?', [clientId]);
+        logger.info(`数据库记录已删除: ${clientId}`);
+    } catch (error) {
+        logger.warn('从数据库删除客户端失败', { error: error.message, clientId });
+    }
 }
 
 // ClientManager
