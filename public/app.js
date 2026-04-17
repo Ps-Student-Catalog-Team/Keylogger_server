@@ -816,6 +816,7 @@ function parseExtractedPasswords(content) {
     const passwords = [];
     const lines = content.split('\n');
     let currentPassword = null;
+    let inPasswordContent = false;
     
     for (const line of lines) {
         const trimmedLine = line.trim();
@@ -833,13 +834,21 @@ function parseExtractedPasswords(content) {
                 password: '',
                 rawPassword: ''
             };
+            inPasswordContent = false;
         } else if (currentPassword) {
             if (trimmedLine.startsWith('时间:')) {
                 currentPassword.timestamp = trimmedLine.substring(4).trim();
+                inPasswordContent = false;
             } else if (trimmedLine.startsWith('内容:')) {
+                // 开始读取密码内容，可能包含多行
                 currentPassword.password = trimmedLine.substring(4).trim();
+                inPasswordContent = true;
             } else if (trimmedLine.startsWith('原始数据:')) {
                 currentPassword.rawPassword = trimmedLine.substring(5).trim();
+                inPasswordContent = false;
+            } else if (inPasswordContent) {
+                // 密码内容的后续行
+                currentPassword.password += '\n' + trimmedLine;
             }
         }
     }
