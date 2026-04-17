@@ -618,6 +618,11 @@ async function viewLog(clientId, filename) {
 async function viewLogWithPassword(clientId, filename, password, rawPassword) {
     try {
         const response = await fetch(`/api/clients/${clientId}/logs/${filename}/raw`);
+        
+        if (!response.ok) {
+            throw new Error(`服务器返回错误: ${response.status}`);
+        }
+        
         const content = await response.text();
         document.getElementById('logModalTitle').textContent = filename;
         
@@ -650,7 +655,7 @@ async function viewLogWithPassword(clientId, filename, password, rawPassword) {
         }, 100);
     } catch (e) {
         console.error('查看日志失败:', e);
-        showToast('查看失败', 'error');
+        showToast('查看失败，文件可能不存在或已被删除', 'error');
     }
 }
 

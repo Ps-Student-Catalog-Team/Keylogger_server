@@ -1144,17 +1144,51 @@ app.get('/api/clients/:clientId/logs/:filename/download', asyncHandler(async (re
 }));
 
 app.get('/api/clients/:clientId/logs/:filename/raw', asyncHandler(async (req, res) => {
-    const clientInfo = getClientInfoById(req.params.clientId);
+    const clientId = req.params.clientId;
     const filename = path.basename(req.params.filename);
     if (filename !== req.params.filename) {
         return res.status(400).send('非法文件名');
     }
+    
     // 对于密码提取结果文件，直接从根目录读取
-    const filePath = filename.startsWith('passwords_') 
-        ? `${alistClient.basePath}/${filename}` 
-        : `${(clientInfo.exists ? clientInfo.logDir : alistClient.basePath)}/${filename}`;
-    const content = await alistClient.readFile(filePath);
-    res.type('text/plain').send(content);
+    if (filename.startsWith('passwords_')) {
+        const filePath = `${alistClient.basePath}/${filename}`;
+        try {
+            const content = await alistClient.readFile(filePath);
+            res.type('text/plain').send(content);
+        } catch (error) {
+            logger.error('读取密码提取文件失败', { error: error.message, filePath });
+            res.status(404).send('文件不存在或读取失败');
+        }
+    } else {
+        // 处理普通日志文件
+        let clientInfo = getClientInfoById(clientId);
+        
+        // 尝试从 clientId 中提取 IP
+        let ipMatch = clientId.match(/^(\d+\.\d+\.\d+\.\d+):\d+$/);
+        if (!clientInfo.exists && ipMatch) {
+            // 如果客户端不存在，尝试直接使用 IP 作为目录名
+            const ip = ipMatch[1];
+            const filePath = `${alistClient.basePath}/${filename}`;
+            try {
+                const content = await alistClient.readFile(filePath);
+                res.type('text/plain').send(content);
+            } catch (error) {
+                logger.error('读取日志文件失败', { error: error.message, filePath, clientId });
+                res.status(404).send('文件不存在或读取失败');
+            }
+        } else {
+            // 使用正常的客户端信息
+            const filePath = `${(clientInfo.exists ? clientInfo.logDir : alistClient.basePath)}/${filename}`;
+            try {
+                const content = await alistClient.readFile(filePath);
+                res.type('text/plain').send(content);
+            } catch (error) {
+                logger.error('读取日志文件失败', { error: error.message, filePath, clientId });
+                res.status(404).send('文件不存在或读取失败');
+            }
+        }
+    }
 }));
 
 app.delete('/api/clients/:clientId/logs/:filename', asyncHandler(async (req, res) => {
