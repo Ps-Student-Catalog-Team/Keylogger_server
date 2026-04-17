@@ -322,6 +322,17 @@ class AlistClient {
             headers: { 'Authorization': this.token },
             responseType: 'stream'
         });
+
+        if (response.headers['content-type']) {
+            res.setHeader('Content-Type', response.headers['content-type']);
+        }
+        if (response.headers['content-disposition']) {
+            res.setHeader('Content-Disposition', response.headers['content-disposition']);
+        }
+
+        response.data.on('error', (err) => {
+            res.destroy(err);
+        });
         response.data.pipe(res);
     }
 
@@ -472,8 +483,6 @@ class ClientManager {
         this.reconnectQueue = new Set();
         this.reconnectLimit = pLimit(CONFIG.maxConcurrentReconnects);
         this.logger = logger.child({ module: 'ClientManager' });
-
-        this.init();
     }
 
     async init() {
@@ -622,14 +631,15 @@ class ClientManager {
     }
 
     async broadcastCommand(command) {
-        const results = [];
+        const tasks = [];
         for (const [clientId, client] of this.clients) {
             if (client.status === 'online') {
-                const result = await this.sendCommand(clientId, command);
-                results.push({ clientId, ...result });
+                tasks.push(
+                    this.sendCommand(clientId, command).then(result => ({ clientId, ...result }))
+                );
             }
         }
-        return results;
+        return Promise.all(tasks);
     }
 
     startHeartbeat() {
@@ -655,13 +665,15 @@ class ClientManager {
 
     async connectAllKnownClients() {
         this.logger.info('开始逐个连接已知客户端...');
-        const entries = Array.from(this.knownClients.entries());
-        for (const [clientId, info] of entries) {
-            if (this.clients.has(clientId) && this.clients.get(clientId).status === 'online') {
+        const connectTasks = [];
+        for (const [clientId, info] of this.knownClients.entries()) {
+            const existingClient = this.clients.get(clientId);
+            if (existingClient && existingClient.status === 'online') {
                 continue;
             }
-            await this.reconnectSingleClient(clientId);
+            connectTasks.push(this.reconnectLimit(() => this.reconnectSingleClient(clientId)));
         }
+        await Promise.allSettled(connectTasks);
         this.logger.info('已知客户端连接尝试完成');
     }
 
@@ -803,22 +815,31 @@ class ClientManager {
             throw new Error('IP 地址格式错误');
         }
 
-        const ipToInt = (ip) => {
+        const ipStringToNumber = (ip) => {
             const parts = ip.split('.').map(Number);
-            return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+            if (parts.length !== 4 || parts.some(part => Number.isNaN(part) || part < 0 || part > 255)) {
+                throw new Error('IP 地址格式错误');
+            }
+            return parts.reduce((acc, part) => acc * 256n + BigInt(part), 0n);
         };
-        const intToIp = (int) => {
+        const ipNumberToString = (num) => {
             return [
-                (int >> 24) & 0xFF,
-                (int >> 16) & 0xFF,
-                (int >> 8) & 0xFF,
-                int & 0xFF
+                Number((num >> 24n) & 0xFFn),
+                Number((num >> 16n) & 0xFFn),
+                Number((num >> 8n) & 0xFFn),
+                Number(num & 0xFFn)
             ].join('.');
         };
 
-        const startInt = ipToInt(startIp);
-        const endInt = ipToInt(endIp);
-        const total = endInt - startInt + 1;
+        const startInt = ipStringToNumber(startIp);
+        const endInt = ipStringToNumber(endIp);
+        const total = Number(endInt - startInt + 1n);
+        if (total <= 0) {
+            throw new Error('IP 范围无效');
+        }
+        if (total > 65536) {
+            throw new Error('扫描范围过大，最多允许 65536 个 IP');
+        }
 
         this.logger.info(`开始扫描网络: ${startIp} - ${endIp}, 端口: ${ports.join(',')}`);
 
@@ -827,7 +848,7 @@ class ClientManager {
 
         const tasks = [];
         for (let i = 0; i < total; i++) {
-            const ip = intToIp(startInt + i);
+            const ip = ipNumberToString(startInt + BigInt(i));
             tasks.push(limit(() => this.scanIp(ip, ports).then(client => {
                 if (client) foundClients.push(client);
             })));
@@ -1079,7 +1100,11 @@ app.get('/api/clients/:clientId/logs/:filename', asyncHandler(async (req, res) =
     if (!clientInfo.exists) {
         return res.status(404).json({ error: '客户端不存在' });
     }
-    const filePath = `${clientInfo.logDir}/${req.params.filename}`;
+    const filename = path.basename(req.params.filename);
+    if (filename !== req.params.filename) {
+        return res.status(400).json({ error: '非法文件名' });
+    }
+    const filePath = `${clientInfo.logDir}/${filename}`;
     const content = await alistClient.readFile(filePath);
     res.json({ content });
 }));
@@ -1089,7 +1114,11 @@ app.get('/api/clients/:clientId/logs/:filename/download', asyncHandler(async (re
     if (!clientInfo.exists) {
         return res.status(404).json({ error: '客户端不存在' });
     }
-    const filePath = `${clientInfo.logDir}/${req.params.filename}`;
+    const filename = path.basename(req.params.filename);
+    if (filename !== req.params.filename) {
+        return res.status(400).json({ error: '非法文件名' });
+    }
+    const filePath = `${clientInfo.logDir}/${filename}`;
     await alistClient.downloadFile(filePath, res);
 }));
 
@@ -1098,7 +1127,11 @@ app.get('/api/clients/:clientId/logs/:filename/raw', asyncHandler(async (req, re
     if (!clientInfo.exists) {
         return res.status(404).send('客户端不存在');
     }
-    const filePath = `${clientInfo.logDir}/${req.params.filename}`;
+    const filename = path.basename(req.params.filename);
+    if (filename !== req.params.filename) {
+        return res.status(400).send('非法文件名');
+    }
+    const filePath = `${clientInfo.logDir}/${filename}`;
     const content = await alistClient.readFile(filePath);
     res.type('text/plain').send(content);
 }));
@@ -1108,7 +1141,11 @@ app.delete('/api/clients/:clientId/logs/:filename', asyncHandler(async (req, res
     if (!clientInfo.exists) {
         return res.status(404).json({ error: '客户端不存在' });
     }
-    const filePath = `${clientInfo.logDir}/${req.params.filename}`;
+    const filename = path.basename(req.params.filename);
+    if (filename !== req.params.filename) {
+        return res.status(400).json({ error: '非法文件名' });
+    }
+    const filePath = `${clientInfo.logDir}/${filename}`;
     
     await alistClient.deleteFile(filePath);
     logger.info(`日志文件已删除: ${filePath}`, { clientId: req.params.clientId });
@@ -1118,13 +1155,17 @@ app.delete('/api/clients/:clientId/logs/:filename', asyncHandler(async (req, res
 
 app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uploadSizeLimit }), asyncHandler(async (req, res) => {
     const ip = req.params.ip;
-    const clientId = Array.from(clientManager.clients.keys()).find(id => id.startsWith(ip));
+    let clientId = Array.from(clientManager.clients.keys()).find(id => id.startsWith(ip));
     if (!clientId) {
-        return res.status(404).json({ error: '客户端不存在或离线' });
+        clientId = Array.from(clientManager.knownClients.keys()).find(id => id.startsWith(ip));
+    }
+    if (!clientId) {
+        return res.status(404).json({ error: '客户端不存在' });
     }
     const client = clientManager.clients.get(clientId);
-    const filename = `${ip}_${new Date().toISOString().split('T')[0].replace(/-/g, '')}.log`;
-    const result = await alistClient.uploadFile(client.logDir, filename, req.body.toString());
+    const logDir = client ? client.logDir : alistClient.basePath;
+    const filename = `${ip}_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.log`;
+    const result = await alistClient.uploadFile(logDir, filename, req.body.toString());
     res.json(result);
 }));
 
@@ -1138,10 +1179,16 @@ app.use((err, req, res, next) => {
 });
 
 // 关机
+let shuttingDown = false;
+
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 async function shutdown() {
+    if (shuttingDown) {
+        return;
+    }
+    shuttingDown = true;
     logger.info('开始关机...');
     clearInterval(clientManager.heartbeatTimer);
     clearInterval(clientManager.reconnectTimer);
@@ -1159,8 +1206,19 @@ async function shutdown() {
 }
 
 // 启动服务
-server.listen(CONFIG.httpPort, async () => {
-    logger.info(`HTTP 服务运行在端口 ${CONFIG.httpPort}`);
-    const url = `http://localhost:${CONFIG.httpPort}/login.html`;
-    logger.info(`访问 ${url} 打开管理界面`);
-});
+(async () => {
+    try {
+        await clientManager.init();
+        server.listen(CONFIG.httpPort, () => {
+            logger.info(`HTTP 服务运行在端口 ${CONFIG.httpPort}`);
+            const url = `http://localhost:${CONFIG.httpPort}/login.html`;
+            logger.info(`访问 ${url} 打开管理界面`);
+            if (process.env.NODE_ENV !== 'test') {
+                open(url).catch(err => logger.warn('自动打开浏览器失败', { error: err.message }));
+            }
+        });
+    } catch (err) {
+        logger.error('服务启动失败', { error: err.message, stack: err.stack });
+        process.exit(1);
+    }
+})();
