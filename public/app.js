@@ -262,19 +262,25 @@ function renderClientsTable() {
         const isConnecting = connectingClients.has(client.id);
 
         let actionButtons = `
-            <button class="btn btn-sm btn-primary" onclick="showClientModal('${safeId}')">详情</button>
+            <button class="btn btn-sm btn-primary" onclick="showClientModal('${safeId}')">
+                <i class="fas fa-info-circle"></i> 详情
+            </button>
         `;
 
         if (client.status === 'online') {
-            actionButtons += `<button class="btn btn-sm btn-warning" onclick="disconnectClient('${safeId}')">断开</button>`;
+            actionButtons += `<button class="btn btn-sm btn-warning" onclick="disconnectClient('${safeId}')">
+                <i class="fas fa-times-circle"></i> 断开
+            </button>`;
         } else {
             const connectBtnText = isConnecting 
                 ? '<span class="btn-spinner"></span> 连接中' 
-                : '连接';
+                : '<i class="fas fa-plug"></i> 连接';
             const disabledAttr = isConnecting ? 'disabled' : '';
             actionButtons += `<button class="btn btn-sm btn-success" onclick="connectClient('${safeIp}', ${safePort}, '${safeId}')" ${disabledAttr}>${connectBtnText}</button>`;
         }
-        actionButtons += `<button class="btn btn-sm btn-danger" onclick="deleteClient('${safeId}')">删除</button>`;
+        actionButtons += `<button class="btn btn-sm btn-danger" onclick="deleteClient('${safeId}')">
+            <i class="fas fa-trash"></i> 删除
+        </button>`;
 
         html += `<tr>
             <td>${safeIp}</td>
@@ -577,9 +583,15 @@ function renderLogsTable(logs, clientId) {
                 <td>${time}</td>
                 <td>
                     <div class="action-btns">
-                        <button class="btn btn-sm btn-primary" onclick="viewLog('${escapeHtml(logClientId)}', '${escapeHtml(log.filename)}')">查看</button>
-                        <button class="btn btn-sm btn-success" onclick="downloadLog('${escapeHtml(logClientId)}', '${escapeHtml(log.filename)}')">下载</button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteLog('${escapeHtml(logClientId)}', '${escapeHtml(log.filename)}')">删除</button>
+                        <button class="btn btn-sm btn-primary" onclick="viewLog('${escapeHtml(logClientId)}', '${escapeHtml(log.filename)}')">
+                            <i class="fas fa-eye"></i> 查看
+                        </button>
+                        <button class="btn btn-sm btn-success" onclick="downloadLog('${escapeHtml(logClientId)}', '${escapeHtml(log.filename)}')">
+                            <i class="fas fa-download"></i> 下载
+                        </button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteLog('${escapeHtml(logClientId)}', '${escapeHtml(log.filename)}')">
+                            <i class="fas fa-trash"></i> 删除
+                        </button>
                     </div>
                 </td>
             </tr>`;
@@ -665,7 +677,8 @@ function saveSettings() {
 
 // Toast 提示
 function showToast(message, type = 'success') {
-    dom.toast.textContent = message;
+    const icon = type === 'success' ? '<i class="fas fa-check-circle"></i>' : '<i class="fas fa-exclamation-circle"></i>';
+    dom.toast.innerHTML = `${icon} ${message}`;
     dom.toast.className = `toast ${type} show`;
     if (toastTimer) {
         clearTimeout(toastTimer);

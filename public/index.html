@@ -1,86 +1,211 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Keylogger 服务器管理</title>
-    <style>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Keylogger 服务器管理</title>
+        <link rel="stylesheet" href="vendor/font-awesome/all.min.css">
+        <style>
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
 
+        :root {
+            --primary: #3b82f6;
+            --primary-dark: #2563eb;
+            --success: #10b981;
+            --success-dark: #059669;
+            --danger: #ef4444;
+            --danger-dark: #dc2626;
+            --warning: #f59e0b;
+            --warning-dark: #d97706;
+            --info: #3b82f6;
+            --info-dark: #2563eb;
+            --light: #f3f4f6;
+            --dark: #1f2937;
+            --gray: #6b7280;
+            --gray-light: #e5e7eb;
+            --white: #ffffff;
+            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f5f5;
-            color: #333;
+            background: #f9fafb;
+            color: var(--dark);
         }
 
         .header {
-            background: #2c3e50;
-            color: white;
+            background: var(--white);
+            color: var(--dark);
             padding: 1rem 2rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            box-shadow: var(--shadow);
         }
 
         .header h1 {
             font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--primary);
         }
 
         .connection-status {
             display: flex;
             align-items: center;
             gap: 0.5rem;
+            font-weight: 500;
         }
 
         .status-dot {
             width: 10px;
             height: 10px;
             border-radius: 50%;
-            background: #e74c3c;
+            background: var(--danger);
+            box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
         }
 
         .status-dot.connected {
-            background: #2ecc71;
+            background: var(--success);
+            box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
         }
 
         .container {
             display: flex;
-            height: calc(100vh - 60px);
+            height: calc(100vh - 80px);
         }
 
         .sidebar {
             width: 250px;
-            background: white;
-            border-right: 1px solid #ddd;
-            padding: 1rem;
+            background: var(--white);
+            border-right: 1px solid var(--gray-light);
+            padding: 1.5rem 1rem;
+            box-shadow: var(--shadow);
         }
 
         .sidebar h3 {
             margin-bottom: 1rem;
-            color: #666;
-            font-size: 0.9rem;
+            color: var(--gray);
+            font-size: 0.875rem;
+            font-weight: 600;
             text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
 
         .nav-item {
             padding: 0.75rem 1rem;
-            margin-bottom: 0.5rem;
-            border-radius: 4px;
+            margin-bottom: 0.25rem;
+            border-radius: 6px;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            font-weight: 500;
+            position: relative;
+            overflow: hidden;
         }
 
         .nav-item:hover {
-            background: #f0f0f0;
+            background: var(--light);
+            transform: translateX(6px);
         }
 
         .nav-item.active {
-            background: #3498db;
+            background: var(--primary);
             color: white;
+            transform: translateX(6px);
+        }
+
+        .nav-item.active::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: var(--primary-dark);
+            border-radius: 0 3px 3px 0;
+        }
+
+        .nav-item i {
+            transition: all 0.3s ease;
+        }
+
+        .nav-item:hover i {
+            transform: scale(1.1);
+        }
+
+        .nav-item.active i {
+            transform: scale(1.1) rotate(5deg);
+        }
+
+        /* 页面切换动画 */
+        .page {
+            animation: fadeIn 0.5s ease;
+        }
+
+        /* 骨架屏效果 */
+        .skeleton {
+            background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+            background-size: 200% 100%;
+            animation: skeletonLoading 1.5s infinite;
+        }
+
+        @keyframes skeletonLoading {
+            0% {
+                background-position: 200% 0;
+            }
+            100% {
+                background-position: -200% 0;
+            }
+        }
+
+        /* 按钮点击动画 */
+        .btn:active {
+            transform: translateY(1px);
+        }
+
+        /* 卡片加载动画 */
+        .card {
+            animation: cardFadeIn 0.5s ease;
+        }
+
+        @keyframes cardFadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* 表格行动画 */
+        tr {
+            transition: all 0.3s ease;
+        }
+
+        /* 滚动条样式 */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--light);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--gray-light);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--gray);
         }
 
         .main-content {
@@ -90,138 +215,383 @@
         }
 
         .toolbar {
-            background: white;
-            padding: 1rem;
-            border-radius: 8px;
-            margin-bottom: 1rem;
+            background: var(--white);
+            padding: 1.25rem;
+            border-radius: 10px;
+            margin-bottom: 1.5rem;
             display: flex;
             gap: 1rem;
             flex-wrap: wrap;
             align-items: center;
+            box-shadow: var(--shadow);
         }
 
         .btn {
-            padding: 0.5rem 1rem;
+            padding: 0.625rem 1.25rem;
             border: none;
-            border-radius: 4px;
+            border-radius: 6px;
             cursor: pointer;
-            font-size: 0.9rem;
-            transition: all 0.2s;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .btn::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+            transition: left 0.5s ease;
+        }
+
+        .btn:hover::before {
+            left: 100%;
         }
 
         .btn-primary {
-            background: #3498db;
+            background: var(--primary);
             color: white;
         }
 
         .btn-primary:hover {
-            background: #2980b9;
+            background: var(--primary-dark);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        }
+
+        .btn-primary:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5);
         }
 
         .btn-success {
-            background: #2ecc71;
+            background: var(--success);
             color: white;
         }
 
         .btn-success:hover {
-            background: #27ae60;
+            background: var(--success-dark);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        }
+
+        .btn-success:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.5);
         }
 
         .btn-danger {
-            background: #e74c3c;
+            background: var(--danger);
             color: white;
         }
 
         .btn-danger:hover {
-            background: #c0392b;
+            background: var(--danger-dark);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+        }
+
+        .btn-danger:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.5);
         }
 
         .btn-warning {
-            background: #f39c12;
+            background: var(--warning);
             color: white;
         }
 
         .btn-warning:hover {
-            background: #e67e22;
+            background: var(--warning-dark);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
+        }
+
+        .btn-warning:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.5);
         }
 
         .btn:disabled {
-            opacity: 0.5;
+            opacity: 0.6;
             cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .btn:disabled:hover {
+            transform: none;
+        }
+
+        .btn-sm {
+            padding: 0.375rem 0.75rem;
+            font-size: 0.8rem;
         }
 
         input[type="text"], input[type="number"] {
-            padding: 0.5rem;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 0.9rem;
+            padding: 0.625rem;
+            border: 2px solid var(--gray-light);
+            border-radius: 6px;
+            font-size: 0.875rem;
+            transition: all 0.2s ease;
+            width: 100%;
+        }
+
+        input[type="text"]:focus, input[type="number"]:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+            transform: translateY(-1px);
+        }
+
+        input[type="text"]::placeholder, input[type="number"]::placeholder {
+            color: var(--gray);
+            opacity: 0.7;
+        }
+
+        select {
+            padding: 0.625rem;
+            border: 2px solid var(--gray-light);
+            border-radius: 6px;
+            font-size: 0.875rem;
+            transition: all 0.2s ease;
+            background: var(--white);
+            cursor: pointer;
+        }
+
+        select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
         }
 
         .card {
-            background: white;
-            border-radius: 8px;
+            background: var(--white);
+            border-radius: 10px;
             padding: 1.5rem;
-            margin-bottom: 1rem;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 1.5rem;
+            box-shadow: var(--shadow);
+            transition: all 0.3s ease;
+            border: 1px solid var(--gray-light);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, var(--primary), var(--success));
+            border-radius: 10px 10px 0 0;
+        }
+
+        .card:hover {
+            box-shadow: var(--shadow-lg);
+            transform: translateY(-2px);
+            border-color: var(--primary);
         }
 
         .card h3 {
             margin-bottom: 1rem;
-            color: #2c3e50;
+            color: var(--dark);
+            font-size: 1.125rem;
+            font-weight: 600;
+            position: relative;
+            padding-bottom: 0.5rem;
+        }
+
+        .card h3::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 60px;
+            height: 3px;
+            background: var(--primary);
+            border-radius: 3px;
         }
 
         table {
             width: 100%;
             border-collapse: collapse;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
         }
 
         th, td {
-            padding: 0.75rem;
+            padding: 0.875rem 1rem;
             text-align: left;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid var(--gray-light);
         }
 
         th {
             font-weight: 600;
-            color: #666;
-            background: #f8f9fa;
+            color: var(--gray);
+            background: var(--light);
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            position: relative;
+        }
+
+        th:hover {
+            background: #e5e7eb;
+        }
+
+        tr:nth-child(even) {
+            background: rgba(243, 244, 246, 0.5);
         }
 
         tr:hover {
-            background: #f8f9fa;
+            background: var(--light);
+            transform: translateY(-1px);
+            transition: transform 0.2s ease;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
         }
 
         .status-badge {
-            padding: 0.25rem 0.5rem;
-            border-radius: 12px;
+            padding: 0.375rem 0.75rem;
+            border-radius: 16px;
             font-size: 0.75rem;
             font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
         }
 
         .status-online {
-            background: #d4edda;
-            color: #155724;
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--success);
         }
 
         .status-offline {
-            background: #f8d7da;
-            color: #721c24;
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--danger);
         }
 
         .status-recording {
-            background: #fff3cd;
-            color: #856404;
+            background: rgba(245, 158, 11, 0.1);
+            color: var(--warning);
         }
 
         .status-paused {
-            background: #e2e3e5;
-            color: #383d41;
+            background: rgba(107, 114, 128, 0.1);
+            color: var(--gray);
         }
 
         .action-btns {
             display: flex;
             gap: 0.5rem;
             flex-wrap: wrap;
+        }
+
+        /* 响应式设计 */
+        @media (max-width: 1024px) {
+            .sidebar {
+                width: 200px;
+            }
+            
+            .main-content {
+                padding: 1.5rem;
+            }
+            
+            .toolbar {
+                padding: 1rem;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                flex-direction: column;
+                height: auto;
+            }
+            
+            .sidebar {
+                width: 100%;
+                border-right: none;
+                border-bottom: 1px solid var(--gray-light);
+                padding: 1rem;
+                box-shadow: none;
+            }
+            
+            .sidebar h3 {
+                margin-bottom: 0.5rem;
+            }
+            
+            .nav-item {
+                padding: 0.5rem 0.75rem;
+                margin-bottom: 0.125rem;
+            }
+            
+            .main-content {
+                padding: 1rem;
+            }
+            
+            .toolbar {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 0.75rem;
+            }
+            
+            .toolbar button {
+                width: 100%;
+                justify-content: center;
+            }
+            
+            .header {
+                padding: 1rem;
+            }
+            
+            .header h1 {
+                font-size: 1.25rem;
+            }
+            
+            table {
+                font-size: 0.875rem;
+            }
+            
+            th, td {
+                padding: 0.625rem 0.75rem;
+            }
+            
+            .action-btns {
+                justify-content: center;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .card {
+                padding: 1rem;
+            }
+            
+            .modal-content {
+                padding: 1.5rem;
+                width: 95%;
+            }
+            
+            .form-group input {
+                padding: 0.5rem;
+            }
+            
+            .btn {
+                padding: 0.5rem 1rem;
+                font-size: 0.875rem;
+            }
         }
 
         .btn-sm {
@@ -236,10 +606,17 @@
             left: 0;
             width: 100%;
             height: 100%;
-            background: rgba(0,0,0,0.5);
+            background: rgba(0, 0, 0, 0.6);
             justify-content: center;
             align-items: center;
             z-index: 1000;
+            backdrop-filter: blur(4px);
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
         }
 
         .modal.show {
@@ -247,22 +624,51 @@
         }
 
         .modal-content {
-            background: white;
-            border-radius: 8px;
+            background: var(--white);
+            border-radius: 10px;
             padding: 2rem;
             width: 90%;
             max-width: 500px;
+            box-shadow: var(--shadow-lg);
+            animation: slideIn 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px) scale(0.95);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        .modal-content::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, var(--primary), var(--success));
+            border-radius: 10px 10px 0 0;
         }
 
         .modal-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 1rem;
+            margin-bottom: 1.5rem;
         }
 
         .modal-header h3 {
             margin: 0;
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--dark);
         }
 
         .close-btn {
@@ -270,17 +676,27 @@
             border: none;
             font-size: 1.5rem;
             cursor: pointer;
-            color: #666;
+            color: var(--gray);
+            transition: all 0.2s ease;
+            padding: 0.25rem;
+            border-radius: 4px;
+        }
+
+        .close-btn:hover {
+            background: var(--light);
+            color: var(--dark);
+            transform: rotate(90deg);
         }
 
         .form-group {
-            margin-bottom: 1rem;
+            margin-bottom: 1.25rem;
         }
 
         .form-group label {
             display: block;
             margin-bottom: 0.5rem;
             font-weight: 500;
+            color: var(--dark);
         }
 
         .form-group input {
@@ -290,34 +706,62 @@
         .log-viewer {
             background: #1e1e1e;
             color: #d4d4d4;
-            padding: 1rem;
-            border-radius: 4px;
+            padding: 1.5rem;
+            border-radius: 8px;
             font-family: 'Consolas', monospace;
             font-size: 0.85rem;
-            max-height: 400px;
+            max-height: 500px;
             overflow-y: auto;
             white-space: pre-wrap;
+            border: 1px solid #333;
+        }
+
+        .log-viewer::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .log-viewer::-webkit-scrollbar-track {
+            background: #2d2d2d;
+            border-radius: 4px;
+        }
+
+        .log-viewer::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 4px;
+        }
+
+        .log-viewer::-webkit-scrollbar-thumb:hover {
+            background: #777;
         }
 
         .tabs {
             display: flex;
-            border-bottom: 1px solid #ddd;
-            margin-bottom: 1rem;
+            border-bottom: 1px solid var(--gray-light);
+            margin-bottom: 1.5rem;
         }
 
         .tab {
             padding: 0.75rem 1.5rem;
             cursor: pointer;
             border-bottom: 2px solid transparent;
+            transition: all 0.2s ease;
+            font-weight: 500;
+        }
+
+        .tab:hover {
+            background: var(--light);
+            color: var(--primary);
         }
 
         .tab.active {
-            border-bottom-color: #3498db;
-            color: #3498db;
+            border-bottom-color: var(--primary);
+            color: var(--primary);
+            background: rgba(59, 130, 246, 0.05);
         }
 
         .tab-content {
             display: none;
+            animation: fadeIn 0.3s ease;
         }
 
         .tab-content.active {
@@ -326,26 +770,39 @@
 
         .empty-state {
             text-align: center;
-            padding: 3rem;
-            color: #666;
+            padding: 4rem 2rem;
+            color: var(--gray);
+            background: var(--light);
+            border-radius: 8px;
+            margin: 2rem 0;
+        }
+
+        .empty-state i {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: var(--primary);
         }
 
         .scan-progress {
             display: none;
             align-items: center;
-            gap: 0.5rem;
-            color: #666;
+            gap: 0.75rem;
+            color: var(--gray);
+            padding: 0.75rem 1.25rem;
+            background: var(--light);
+            border-radius: 6px;
         }
 
         .scan-progress.show {
             display: flex;
+            animation: fadeIn 0.3s ease;
         }
 
         .spinner {
-            width: 16px;
-            height: 16px;
-            border: 2px solid #ddd;
-            border-top-color: #3498db;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--gray-light);
+            border-top-color: var(--primary);
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
@@ -359,12 +816,17 @@
             bottom: 2rem;
             right: 2rem;
             padding: 1rem 1.5rem;
-            border-radius: 4px;
+            border-radius: 8px;
             color: white;
             font-weight: 500;
             z-index: 2000;
             transform: translateX(150%);
-            transition: transform 0.3s;
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            box-shadow: var(--shadow-lg);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            max-width: 350px;
         }
 
         .toast.show {
@@ -372,11 +834,26 @@
         }
 
         .toast.success {
-            background: #2ecc71;
+            background: var(--success);
         }
 
         .toast.error {
-            background: #e74c3c;
+            background: var(--danger);
+        }
+
+        .toast i {
+            font-size: 1.25rem;
+        }
+
+        .btn-spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 0.5rem;
         }
     </style>
 </head>
@@ -392,27 +869,47 @@
     <div class="container">
         <div class="sidebar">
             <h3>菜单</h3>
-            <div class="nav-item active" data-page="clients">客户端管理</div>
-            <div class="nav-item" data-page="logs">日志文件</div>
-            <div class="nav-item" data-page="settings">系统设置</div>
+            <div class="nav-item active" data-page="clients">
+                <i class="fas fa-laptop"></i> 客户端管理
+            </div>
+            <div class="nav-item" data-page="logs">
+                <i class="fas fa-file-alt"></i> 日志文件
+            </div>
+            <div class="nav-item" data-page="settings">
+                <i class="fas fa-cog"></i> 系统设置
+            </div>
         </div>
 
         <div class="main-content">
             <!-- 客户端管理页面 -->
             <div id="clientsPage" class="page">
                 <div class="toolbar">
-                    <button class="btn btn-primary" onclick="showConnectModal()">手动连接</button>
-                    <button class="btn btn-success" onclick="connectAllClients()">连接全部离线</button>
-                    <button class="btn btn-success" onclick="showScanModal()">扫描网络</button>
+                    <button class="btn btn-primary" onclick="showConnectModal()">
+                        <i class="fas fa-plug"></i> 手动连接
+                    </button>
+                    <button class="btn btn-success" onclick="connectAllClients()">
+                        <i class="fas fa-plug-circle"></i> 连接全部离线
+                    </button>
+                    <button class="btn btn-success" onclick="showScanModal()">
+                        <i class="fas fa-search"></i> 扫描网络
+                    </button>
                     <div class="scan-progress" id="scanProgress">
                         <div class="spinner"></div>
                         <span>扫描中...</span>
                     </div>
                     <div style="flex: 1;"></div>
-                    <button class="btn btn-warning" onclick="broadcastCommand('pause_record')">全部暂停</button>
-                    <button class="btn btn-success" onclick="broadcastCommand('resume_record')">全部恢复</button>
-                    <button class="btn btn-success" onclick="broadcastCommand('upload_once')">全部上传</button>
-                    <button class="btn btn-danger" onclick="broadcastCommand('stop_upload')">全部停止上传</button>
+                    <button class="btn btn-warning" onclick="broadcastCommand('pause_record')">
+                        <i class="fas fa-pause"></i> 全部暂停
+                    </button>
+                    <button class="btn btn-success" onclick="broadcastCommand('resume_record')">
+                        <i class="fas fa-play"></i> 全部恢复
+                    </button>
+                    <button class="btn btn-success" onclick="broadcastCommand('upload_once')">
+                        <i class="fas fa-cloud-upload-alt"></i> 全部上传
+                    </button>
+                    <button class="btn btn-danger" onclick="broadcastCommand('stop_upload')">
+                        <i class="fas fa-stop"></i> 全部停止上传
+                    </button>
                 </div>
 
                 <div class="card">
@@ -445,7 +942,9 @@
                         <option value="">全部</option>
                     </select>
                     <input type="text" id="logSearch" placeholder="搜索日志..." style="flex: 1; max-width: 300px;">
-                    <button class="btn btn-primary" onclick="refreshLogs()">刷新</button>
+                    <button class="btn btn-primary" onclick="refreshLogs()">
+                        <i class="fas fa-sync-alt"></i> 刷新
+                    </button>
                 </div>
 
                 <div class="card">
@@ -480,7 +979,9 @@
                         <label>连接超时时间 (毫秒)</label>
                         <input type="number" id="connectTimeout" value="5000" min="1000" step="500">
                     </div>
-                    <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+                    <button class="btn btn-primary" onclick="saveSettings()">
+                        <i class="fas fa-save"></i> 保存设置
+                    </button>
                 </div>
             </div>
         </div>
