@@ -886,7 +886,7 @@ function displayExtractedPasswords(passwords) {
     
     // 生成密码列表
     let html = '';
-    passwords.forEach(item => {
+    passwords.forEach((item, index) => {
         // 提取客户端ID和文件名
         let clientId = '';
         let filename = item.file;
@@ -899,8 +899,11 @@ function displayExtractedPasswords(passwords) {
             clientId = client ? client.id : `${ip}:9999`;
         }
         
+        // 为每个项目添加唯一标识符
+        const itemId = `password-item-${index}`;
+        
         html += `
-            <div class="extract-item">
+            <div class="extract-item" id="${itemId}">
                 <div class="index">${item.index}</div>
                 <div class="password-content">
                     ${escapeHtml(item.password)}
@@ -911,7 +914,7 @@ function displayExtractedPasswords(passwords) {
                     ` : ''}
                 </div>
                 <div class="source-file">
-                    <a href="javascript:void(0)" onclick="viewLogWithPassword('${escapeHtml(clientId)}', '${escapeHtml(filename)}', '${escapeHtml(item.password)}', '${escapeHtml(item.rawPassword || '')}')" style="color: var(--primary); text-decoration: underline; cursor: pointer;">
+                    <a href="javascript:void(0)" class="source-file-link" data-client-id="${escapeHtml(clientId)}" data-filename="${escapeHtml(filename)}" data-password="${escapeHtml(item.password)}" data-raw-password="${escapeHtml(item.rawPassword || '')}" style="color: var(--primary); text-decoration: underline; cursor: pointer;">
                         ${escapeHtml(item.file)}
                     </a>
                 </div>
@@ -921,6 +924,18 @@ function displayExtractedPasswords(passwords) {
     });
     
     extractList.innerHTML = html;
+    
+    // 添加点击事件处理程序
+    extractList.addEventListener('click', function(e) {
+        const link = e.target.closest('.source-file-link');
+        if (link) {
+            const clientId = link.dataset.clientId;
+            const filename = link.dataset.filename;
+            const password = link.dataset.password;
+            const rawPassword = link.dataset.rawPassword;
+            viewLogWithPassword(clientId, filename, password, rawPassword);
+        }
+    });
     
     // 添加搜索功能
     const searchInput = document.getElementById('extractSearch');
