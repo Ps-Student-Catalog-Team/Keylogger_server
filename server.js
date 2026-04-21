@@ -239,18 +239,18 @@ app.post('/api/login', asyncHandler(async (req, res) => {
     const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
     
     if (password === AUTH_CONFIG.password) {
-        const token = createAuthToken();
-        const secure = process.env.HTTPS_ENABLED === 'true';
-        res.cookie(AUTH_CONFIG.cookieName, token, {
-            path: '/',
-            httpOnly: true,
-            sameSite: 'Strict',
-            maxAge: AUTH_CONFIG.maxAge,
-            secure
-        });
-        auditLogger.info('用户登录成功', { user: 'admin', action: 'login', ip: clientIP });
-        return res.json({ success: true });
-    }
+    const token = createAuthToken();
+    const secure = process.env.HTTPS_ENABLED === 'true';
+    res.cookie(AUTH_CONFIG.cookieName, token, {
+        path: '/',
+        httpOnly: true,
+        sameSite: 'Strict',
+        // 不设置 maxAge会话 Cookie（浏览器关闭即失效）
+        secure
+    });
+    auditLogger.info('用户登录成功', { user: 'admin', action: 'login', ip: clientIP });
+    return res.json({ success: true });
+}
     
     auditLogger.warn('用户登录失败：密码错误', { user: 'unknown', action: 'login_failed', ip: clientIP });
     return res.status(401).json({ success: false, error: '密码错误' });

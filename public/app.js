@@ -1130,5 +1130,16 @@ window.addEventListener('beforeunload', () => {
     }
 });
 
+// 退出登录
+function logout() {
+    if (confirm('确定要退出登录吗？')) {
+        // 清除本地存储的认证状态（如果有）
+        localStorage.clear();
+        sessionStorage.clear();
+        // 跳转到登出接口，服务端会清除 Cookie 并重定向到登录页
+        window.location.href = '/logout';
+    }
+}
+
 // 初始化连接
 connectWebSocket();

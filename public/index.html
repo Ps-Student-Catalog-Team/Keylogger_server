@@ -976,12 +976,18 @@
 </head>
 <body>
     <div class="header">
-        <h1>Keylogger 服务器管理</h1>
+    <h1>Keylogger 服务器管理</h1>
+    <div style="display: flex; align-items: center; gap: 1rem;">
         <div class="connection-status">
             <div class="status-dot" id="wsStatus"></div>
             <span id="wsStatusText">未连接</span>
         </div>
+        <!-- 退出按钮 -->
+        <button class="btn btn-danger btn-sm" onclick="logout()">
+            <i class="fas fa-sign-out-alt"></i> 退出登录
+        </button>
     </div>
+</div>
 
     <div class="container">
         <div class="sidebar">
