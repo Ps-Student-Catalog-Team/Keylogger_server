@@ -32,6 +32,38 @@
             --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
         }
 
+        /* 轮廓式危险按钮 */
+        .btn-outline-danger {
+            background: transparent;
+            color: var(--danger);
+            border: 1.5px solid var(--danger);
+            box-shadow: none;
+        }
+
+        .btn-outline-danger:hover {
+            background: var(--danger);
+            color: white;
+            border-color: var(--danger);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25);
+        }
+
+        .btn-outline-danger:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+        }
+
+        /* 移动端适配：如果屏幕太小，将 header 改为垂直排列 */
+        @media (max-width: 600px) {
+            .header {
+                flex-wrap: wrap;
+                gap: 0.75rem;
+            }
+            .header > div {
+                margin-left: auto;
+            }
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #f9fafb;
@@ -977,14 +1009,14 @@
 <body>
     <div class="header">
     <h1>Keylogger 服务器管理</h1>
-    <div style="display: flex; align-items: center; gap: 1rem;">
+    <div style="display: flex; align-items: center; gap: 1.25rem;">
         <div class="connection-status">
             <div class="status-dot" id="wsStatus"></div>
             <span id="wsStatusText">未连接</span>
         </div>
-        <!-- 退出按钮 -->
-        <button class="btn btn-danger btn-sm" onclick="logout()">
-            <i class="fas fa-sign-out-alt"></i> 退出登录
+        <!-- 退出登录按钮 -->
+        <button class="btn btn-outline-danger btn-sm" onclick="logout()">
+            <i class="fas fa-sign-out-alt"></i> 退出
         </button>
     </div>
 </div>
