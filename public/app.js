@@ -42,6 +42,20 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
+/**
+ * 对客户端数组进行排序
+ * 排序规则：在线的在前，离线的在后；状态相同时按IP地址排序
+ * @param {Array} clients - 客户端数组
+ * @returns {Array} 排序后的新数组
+ */
+function sortClients(clients) {
+    return [...clients].sort((a, b) => {
+        if (a.status === 'online' && b.status !== 'online') return -1;
+        if (a.status !== 'online' && b.status === 'online') return 1;
+        return a.ip.localeCompare(b.ip);
+    });
+}
+
 // 页面切换
 document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', () => {
@@ -254,12 +268,7 @@ function renderClientsTable() {
     }
 
     // 按照连接状态排序：在线的在前面，离线的在后面
-    const sortedClients = [...clients].sort((a, b) => {
-        if (a.status === 'online' && b.status !== 'online') return -1;
-        if (a.status !== 'online' && b.status === 'online') return 1;
-        // 状态相同时，按照 IP 地址排序
-        return a.ip.localeCompare(b.ip);
-    });
+    const sortedClients = sortClients(clients);
 
     let html = '';
     sortedClients.forEach(client => {
@@ -314,12 +323,7 @@ function renderClientsTable() {
 // 填充日志页面的客户端下拉框
 function populateClientSelect() {
     // 按照连接状态排序：在线的在前面，离线的在后面
-    const sortedClients = [...clients].sort((a, b) => {
-        if (a.status === 'online' && b.status !== 'online') return -1;
-        if (a.status !== 'online' && b.status === 'online') return 1;
-        // 状态相同时，按照 IP 地址排序
-        return a.ip.localeCompare(b.ip);
-    });
+    const sortedClients = sortClients(clients);
 
     let html = '<option value="">全部</option>';
     sortedClients.forEach(client => {
