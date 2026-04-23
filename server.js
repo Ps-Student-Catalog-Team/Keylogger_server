@@ -17,6 +17,37 @@ const open = require('open');
 const crypto = require('crypto');
 const { LRUCache } = require('lru-cache');
 
+// ========== 黑名单缓存 ==========
+const blacklistCache = new LRUCache({
+    max: 10000, // 最多缓存10000个哈希
+    ttl: 5 * 60 * 1000, // 5分钟TTL
+    updateAgeOnGet: true
+});
+let blacklistLastUpdate = 0;
+const BLACKLIST_UPDATE_INTERVAL = 60 * 1000; // 1分钟更新间隔
+
+// ========== 黑名单缓存管理 ==========
+async function loadBlacklistCache() {
+    const now = Date.now();
+    if (now - blacklistLastUpdate < BLACKLIST_UPDATE_INTERVAL && blacklistCache.size > 0) {
+        return; // 缓存未过期
+    }
+    
+    try {
+        const blacklistedRows = await executeWithRetry('SELECT password_hash FROM password_blacklist', []);
+        blacklistCache.clear();
+        blacklistedRows.forEach(row => blacklistCache.set(row.password_hash, true));
+        blacklistLastUpdate = now;
+        logger.debug(`黑名单缓存已更新，共 ${blacklistedRows.length} 个条目`);
+    } catch (error) {
+        logger.warn('加载黑名单缓存失败', { error: error.message });
+    }
+}
+
+function isPasswordBlacklisted(passwordHash) {
+    return blacklistCache.has(passwordHash);
+}
+
 // ========== 工具函数：生成自签名证书 ==========
 function generateSelfSignedCert() {
     const { execSync, spawnSync } = require('child_process');
@@ -580,7 +611,13 @@ async function executeWithRetry(sql, params, retries = CONFIG.db.maxRetries) {
 }
 
 function normalizePassword(password) {
-    return String(password || '').trim();
+    if (!password) return '';
+    let normalized = String(password).trim();
+    // 移除所有空格和换行符
+    normalized = normalized.replace(/\s+/g, '');
+    // 移除常见的特殊字符，但保留字母数字和基本符号
+    normalized = normalized.replace(/[^\w!@#$%^&*()_+\-=\[\]{}|;':",./<>?`~]/g, '');
+    return normalized;
 }
 
 function hashPassword(password) {
@@ -1910,13 +1947,9 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
 
     logger.info(`密码提取：共 ${logFiles.length} 个日志文件，其中 ${filesToProcess.length} 个需要处理`);
 
-    let blacklistedHashes = new Set();
-    try {
-        const blacklistedRows = await executeWithRetry('SELECT password_hash FROM password_blacklist', []);
-        blacklistedRows.forEach(row => blacklistedHashes.add(row.password_hash));
-    } catch (error) {
-        logger.warn('读取密码黑名单失败，继续提取密码', { error: error.message });
-    }
+    // 加载黑名单缓存
+    await loadBlacklistCache();
+    const blacklistedHashes = new Set(blacklistCache.keys());
 
     const extractLimit = pLimit(CONFIG.extractConcurrency);
     const extractTasks = filesToProcess.map(file => extractLimit(async () => {
@@ -1994,6 +2027,8 @@ app.post('/api/blacklist', asyncHandler(async (req, res) => {
         'INSERT IGNORE INTO password_blacklist (password_hash, password) VALUES (?, ?)',
         [passwordHash, normalizedPassword]
     );
+    // 更新缓存
+    blacklistCache.set(passwordHash, true);
     res.json({ success: true });
 }));
 
@@ -2016,8 +2051,16 @@ app.get('/api/blacklist', asyncHandler(async (req, res) => {
 app.delete('/api/blacklist/:id', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ success: false, error: '非法的黑名单 ID' });
+    
+    // 先获取要删除的哈希
+    const rows = await executeWithRetry('SELECT password_hash FROM password_blacklist WHERE id = ?', [id]);
+    if (rows.length === 0) return res.status(404).json({ success: false, error: '黑名单项不存在' });
+    
     const result = await executeWithRetry('DELETE FROM password_blacklist WHERE id = ?', [id]);
     if (result.affectedRows === 0) return res.status(404).json({ success: false, error: '黑名单项不存在' });
+    
+    // 从缓存中移除
+    blacklistCache.delete(rows[0].password_hash);
     res.json({ success: true });
 }));
 
