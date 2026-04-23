@@ -1719,6 +1719,11 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
             }
         }
         result.push(char);
+        
+        // 重置修饰键状态，让修饰键只影响下一个按键
+        shift = false;
+        ctrl = false;
+        alt = false;
     }
     return result.join('');
 }

