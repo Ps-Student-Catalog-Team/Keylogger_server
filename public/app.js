@@ -15,7 +15,7 @@ let blacklistPageSize = 20;
 let blacklistTotalPages = 1;
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
 let autoRefreshTimer = null;
-const AUTO_REFRESH_INTERVAL = 1000; // 1秒
+const AUTO_REFRESH_INTERVAL = 30000; 
 const MAX_RECONNECT_DELAY = 30000;
 
 // DOM 元素
