@@ -2022,6 +2022,40 @@ app.get('/api/blacklist', asyncHandler(async (req, res) => {
 
 // ========== 版本管理 API ==========
 
+// 获取 Alist 配置
+app.get('/api/config', asyncHandler(async (req, res) => {
+    res.json({
+        success: true,
+        config: {
+            alistUrl: CONFIG.alist.url,
+            alistBasePath: CONFIG.alist.basePath
+        }
+    });
+}));
+
+// 获取 Alist 文件列表
+app.get('/api/alist/files', asyncHandler(async (req, res) => {
+    const path = req.query.path || '/学生目录/软件/键盘记录器';
+    try {
+        const files = await alistClient.listFiles(path);
+        // 只过滤 .exe 文件
+        const exeFiles = files
+            .filter(f => f.filename && f.filename.toLowerCase().endsWith('.exe'))
+            .map(f => ({
+                name: f.filename,
+                size: f.size,
+                uploadTime: f.uploadTime
+            }));
+        res.json({
+            success: true,
+            files: exeFiles
+        });
+    } catch (error) {
+        logger.error('获取 Alist 文件列表失败', { error: error.message, path });
+        res.status(500).json({ success: false, error: '获取文件列表失败: ' + error.message });
+    }
+}));
+
 // 获取所有可用版本
 app.get('/api/versions', asyncHandler(async (req, res) => {
     const rows = await executeWithRetry(

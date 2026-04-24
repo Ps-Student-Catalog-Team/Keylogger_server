@@ -751,6 +751,97 @@
             width: 100%;
         }
 
+        /* 文件列表容器样式 */
+        .file-list-container {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1.5px solid var(--gray-light);
+            border-radius: 6px;
+            background: var(--light);
+        }
+
+        .file-list-container .loading,
+        .file-list-container .empty {
+            padding: 1rem;
+            text-align: center;
+            color: var(--gray);
+            font-size: 0.9rem;
+        }
+
+        .file-list-container .error {
+            padding: 1rem;
+            text-align: center;
+            color: var(--danger);
+            font-size: 0.9rem;
+        }
+
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--gray-light);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .file-item:last-child {
+            border-bottom: none;
+        }
+
+        .file-item:hover {
+            background: var(--white);
+        }
+
+        .file-item.selected {
+            background: rgba(59, 130, 246, 0.1);
+            border-left: 3px solid var(--primary);
+        }
+
+        .file-item .file-name {
+            flex: 1;
+            font-weight: 500;
+            color: var(--dark);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .file-item .file-size {
+            margin-left: 1rem;
+            font-size: 0.85rem;
+            color: var(--gray);
+            flex-shrink: 0;
+        }
+
+        /* URL 输入框优化 */
+        .url-input-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .url-input-wrapper input {
+            padding-right: 2.5rem;
+        }
+
+        .clear-url-btn {
+            position: absolute;
+            right: 0.5rem;
+            background: none;
+            border: none;
+            color: var(--gray);
+            cursor: pointer;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .clear-url-btn:hover {
+            color: var(--danger);
+            background: rgba(239, 68, 68, 0.1);
+        }
+
         .log-viewer {
             background: var(--white);
             color: var(--dark);
@@ -1345,8 +1436,19 @@
             </div>
             <div class="form-group">
                 <label><i class="fas fa-link"></i> 下载链接 <span style="color: var(--danger);">*</span></label>
-                <input type="url" id="versionUrl" placeholder="http://example.com/app.exe" title="请输入有效的下载链接" required>
+                <div class="url-input-wrapper">
+                    <input type="url" id="versionUrl" placeholder="点击下方文件自动填充，或手动输入" title="请输入有效的下载链接" required>
+                    <button type="button" class="clear-url-btn" onclick="document.getElementById('versionUrl').value=''" title="清空">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
                 <small style="color: var(--gray);">客户端将从此链接下载更新文件</small>
+            </div>
+            <div class="form-group">
+                <label><i class="fas fa-folder-open"></i> 选择 Alist 文件</label>
+                <div id="addVersionFileList" class="file-list-container">
+                    <div class="loading">加载中...</div>
+                </div>
             </div>
             <div class="form-group">
                 <label style="display: flex; align-items: center; gap: 0.5rem;">
@@ -1388,8 +1490,19 @@
             </div>
             <div class="form-group">
                 <label><i class="fas fa-link"></i> 下载链接 <span style="color: var(--danger);">*</span></label>
-                <input type="url" id="editVersionUrl" placeholder="http://example.com/app.exe" title="请输入有效的下载链接" required>
+                <div class="url-input-wrapper">
+                    <input type="url" id="editVersionUrl" placeholder="点击下方文件自动填充，或手动输入" title="请输入有效的下载链接" required>
+                    <button type="button" class="clear-url-btn" onclick="document.getElementById('editVersionUrl').value=''" title="清空">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
                 <small style="color: var(--gray);">客户端将从此链接下载更新文件</small>
+            </div>
+            <div class="form-group">
+                <label><i class="fas fa-folder-open"></i> 选择 Alist 文件</label>
+                <div id="editVersionFileList" class="file-list-container">
+                    <div class="loading">加载中...</div>
+                </div>
             </div>
             <div class="form-group">
                 <label style="display: flex; align-items: center; gap: 0.5rem;">

@@ -18,6 +18,10 @@ let autoRefreshTimer = null;
 const AUTO_REFRESH_INTERVAL = 30000; 
 const MAX_RECONNECT_DELAY = 30000;
 
+// Alist 配置
+let ALIST_BASE_URL = '';
+let ALIST_BASE_PATH = '';
+
 // DOM 元素
 const dom = {
     wsStatus: document.getElementById('wsStatus'),
@@ -1253,6 +1257,96 @@ function updateCurrentTime() {
 // 初始化连接
 connectWebSocket();
 
+// 加载 Alist 配置
+loadAlistConfig();
+
+// 加载 Alist 配置
+async function loadAlistConfig() {
+    try {
+        const response = await fetch('/api/config');
+        const data = await response.json();
+        if (data.success) {
+            ALIST_BASE_URL = data.config.alistUrl || '';
+            ALIST_BASE_PATH = data.config.alistBasePath || '';
+            console.log('Alist 配置已加载:', { url: ALIST_BASE_URL, path: ALIST_BASE_PATH });
+        }
+    } catch (error) {
+        console.error('加载 Alist 配置失败:', error);
+    }
+}
+
+// 加载 Alist 文件列表
+async function loadAlistFiles(containerId) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    container.innerHTML = '<div class="loading">加载中...</div>';
+
+    try {
+        const response = await fetch('/api/alist/files');
+        const data = await response.json();
+
+        if (data.success && data.files && data.files.length > 0) {
+            renderFileList(containerId, data.files);
+        } else {
+            container.innerHTML = '<div class="empty">暂无文件</div>';
+        }
+    } catch (error) {
+        console.error('加载文件列表失败:', error);
+        container.innerHTML = '<div class="error">加载失败: ' + error.message + '</div>';
+    }
+}
+
+// 渲染文件列表
+function renderFileList(containerId, files) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    container.innerHTML = files.map(file => `
+        <div class="file-item" onclick="selectAlistFile('${containerId}', '${escapeHtml(file.name)}')">
+            <span class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
+            <span class="file-size">${formatFileSize(file.size)}</span>
+        </div>
+    `).join('');
+}
+
+// 选择 Alist 文件
+function selectAlistFile(containerId, filename) {
+    // 取消其他选中状态
+    document.querySelectorAll(`#${containerId} .file-item`).forEach(item => {
+        item.classList.remove('selected');
+    });
+
+    // 选中当前项
+    const container = document.getElementById(containerId);
+    const items = container.querySelectorAll('.file-item');
+    items.forEach(item => {
+        if (item.querySelector('.file-name').textContent === filename) {
+            item.classList.add('selected');
+        }
+    });
+
+    // 生成直链并填入输入框
+    if (ALIST_BASE_URL && filename) {
+        const downloadUrl = `${ALIST_BASE_URL}/d/${filename}`;
+        // 根据容器 ID 确定目标输入框
+        if (containerId === 'addVersionFileList') {
+            document.getElementById('versionUrl').value = downloadUrl;
+        } else if (containerId === 'editVersionFileList') {
+            document.getElementById('editVersionUrl').value = downloadUrl;
+        }
+        showToast('已选择文件: ' + filename, 'success');
+    }
+}
+
+// 格式化文件大小
+function formatFileSize(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + units[i];
+}
+
 // 初始化当前时间并每秒更新
 updateCurrentTime();
 setInterval(updateCurrentTime, 1000);
@@ -1392,6 +1486,9 @@ function showAddVersionModal() {
     showModal('addVersionModal');
     // 自动获焦第一个输入框
     document.getElementById('versionNumber').focus();
+    
+    // 加载 Alist 文件列表
+    loadAlistFiles('addVersionFileList');
 }
 
 // 添加版本
@@ -1485,6 +1582,9 @@ function editVersion(id, version, download_url, is_active, force_update) {
     }
     
     showModal('editVersionModal');
+    
+    // 加载 Alist 文件列表
+    loadAlistFiles('editVersionFileList');
 }
 
 // 更新版本
