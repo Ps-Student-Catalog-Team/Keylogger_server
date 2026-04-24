@@ -374,6 +374,10 @@ class AlistClient {
     async _request(method, endpoint, data = null, options = {}, retry = true) {
         await this._ensureToken();
         const url = `${this.baseUrl}${endpoint}`;
+        this.logger.info(`发送 ${method} 请求到 ${url}`);
+        if (data) {
+            this.logger.info(`请求数据: ${JSON.stringify(data)}`);
+        }
         const headers = {
             'Authorization': this.token,
             ...options.headers
@@ -386,13 +390,25 @@ class AlistClient {
                 headers,
                 ...options
             });
+            this.logger.info(`请求成功，响应状态码: ${response.status}`);
+            this.logger.info(`响应数据: ${JSON.stringify(response.data)}`);
             return response.data;
         } catch (error) {
+            if (error.response) {
+                this.logger.error(`请求失败，响应状态码: ${error.response.status}`);
+                this.logger.error(`响应数据: ${JSON.stringify(error.response.data)}`);
+            } else if (error.request) {
+                this.logger.error(`请求失败，没有收到响应`);
+            } else {
+                this.logger.error(`请求失败，错误: ${error.message}`);
+            }
             if (retry && error.response && error.response.status === 401) {
                 this.logger.warn('Token 失效，重新登录');
                 await this._login();
                 headers.Authorization = this.token;
+                this.logger.info(`重新发送 ${method} 请求到 ${url}`);
                 const retryResponse = await this.axiosInstance({ method, url, data, headers, ...options });
+                this.logger.info(`重试请求成功，响应状态码: ${retryResponse.status}`);
                 return retryResponse.data;
             }
             this.logger.error(`Alist 请求失败: ${method} ${endpoint}`, { error: error.message });
@@ -459,22 +475,31 @@ class AlistClient {
     async listFiles(dirPath) {
         const fullPath = this._getFullPath(dirPath);
         const cacheKey = this._getCacheKey('list', fullPath);
+        this.logger.info(`开始列出目录 ${fullPath} 的文件`);
 
         const cached = this.cache.get(cacheKey);
         if (cached) {
+            this.logger.info(`从缓存获取目录 ${fullPath} 的文件列表，共 ${cached.length} 个文件`);
             return cached;
         }
 
         try {
+            this.logger.info(`发送请求列出目录 ${fullPath} 的文件`);
             const result = await this._request('GET', `/api/fs/list?path=${encodeURIComponent(fullPath)}`);
+            this.logger.info(`请求成功，响应代码: ${result.code}`);
             if (result.code === 200) {
                 let items = [];
                 if (result.data?.content && Array.isArray(result.data.content)) {
                     items = result.data.content;
+                    this.logger.info(`从 result.data.content 获取到 ${items.length} 个文件`);
                 } else if (result.data?.files && Array.isArray(result.data.files)) {
                     items = result.data.files;
+                    this.logger.info(`从 result.data.files 获取到 ${items.length} 个文件`);
                 } else if (Array.isArray(result.data)) {
                     items = result.data;
+                    this.logger.info(`从 result.data 获取到 ${items.length} 个文件`);
+                } else {
+                    this.logger.info(`无法从响应中提取文件列表，响应数据: ${JSON.stringify(result.data)}`);
                 }
                 const transformed = items.map(item => ({
                     filename: item.name || item.filename || 'unknown',
@@ -482,11 +507,15 @@ class AlistClient {
                     uploadTime: new Date(item.modified || item.updated || item.mtime || Date.now())
                 }));
                 this.cache.set(cacheKey, transformed);
+                this.logger.info(`目录 ${fullPath} 的文件列表获取完成，共 ${transformed.length} 个文件`);
                 return transformed;
             }
+            this.logger.info(`响应代码不是 200，返回空列表`);
             return [];
         } catch (err) {
+            this.logger.error(`列出目录 ${fullPath} 的文件失败`, { error: err.message });
             if (err.response && err.response.status === 404) {
+                this.logger.info(`目录 ${fullPath} 不存在，返回空列表`);
                 return [];
             }
             throw err;
@@ -1371,10 +1400,13 @@ app.get('/api/clients', (req, res) => {
 
 app.get('/api/update/get_version', asyncHandler(async (req, res) => {
     try {
+        logger.info('开始获取版本列表');
         // 从alist获取文件列表
         let allFiles = [];
         try {
+            logger.info(`尝试从 Alist 获取文件列表，路径: ${alistClient.basePath}`);
             allFiles = await alistClient.listFiles(alistClient.basePath);
+            logger.info(`成功获取 Alist 文件列表，共 ${allFiles.length} 个文件`);
         } catch (alistError) {
             logger.warn('Alist 连接失败，返回空版本列表', { error: alistError.message });
             return res.json({
@@ -1387,10 +1419,12 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
         }
         
         // 过滤出keylogger应用程序文件（假设文件名包含keylogger且为可执行文件）
+        logger.info(`开始过滤 keylogger 应用程序文件`);
         const keyloggerFiles = allFiles.filter(file => 
             file.filename.toLowerCase().includes('keylogger') && 
             (file.filename.endsWith('.exe') || file.filename.endsWith('.zip'))
         );
+        logger.info(`过滤完成，共 ${keyloggerFiles.length} 个 keylogger 应用程序文件`);
         
         // 提取版本号并生成下载链接
         const versions = [];
@@ -1400,6 +1434,7 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
             if (versionMatch) {
                 const version = versionMatch[1];
                 const downloadUrl = `${alistClient.baseUrl}/d${alistClient.basePath}/${encodeURIComponent(file.filename)}`;
+                logger.info(`提取到版本: ${version}，文件名: ${file.filename}`);
                 
                 // 尝试将版本信息存入数据库
                 try {
@@ -1416,15 +1451,20 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
                             [version, downloadUrl, false, false]
                         );
                         logger.info(`添加新版本到数据库: ${version}`);
+                    } else {
+                        logger.info(`版本 ${version} 已存在于数据库中`);
                     }
                 } catch (dbError) {
                     logger.warn('数据库操作失败，继续处理', { error: dbError.message });
                 }
                 
                 versions.push({ version, downloadUrl, filename: file.filename });
+            } else {
+                logger.info(`无法从文件名 ${file.filename} 中提取版本号`);
             }
         }
         
+        logger.info(`版本列表生成完成，共 ${versions.length} 个版本`);
         return res.json({
             code: 200,
             data: {
