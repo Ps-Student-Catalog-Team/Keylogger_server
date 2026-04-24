@@ -1491,7 +1491,6 @@ function showAddVersionModal() {
     document.getElementById('versionUrl').value = '';
     document.getElementById('isActiveVersion').checked = false;
     document.getElementById('forceUpdate').checked = false;
-    
     // 清空提交按钮状态
     const submitBtn = document.querySelector('#addVersionModal .btn-primary');
     if (submitBtn) {

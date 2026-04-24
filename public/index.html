@@ -1435,14 +1435,7 @@
                 <small style="color: var(--gray);">版本号格式: X.Y.Z 或 X.Y.Z.W</small>
             </div>
             <div class="form-group">
-                <label><i class="fas fa-link"></i> 下载链接 <span style="color: var(--danger);">*</span></label>
-                <div class="url-input-wrapper">
-                    <input type="url" id="versionUrl" placeholder="点击下方文件自动填充，或手动输入" title="请输入有效的下载链接" required>
-                    <button type="button" class="clear-url-btn" onclick="document.getElementById('versionUrl').value=''" title="清空">
-                        <i class="fas fa-times"></i>
-                    </button>
-                </div>
-                <small style="color: var(--gray);">客户端将从此链接下载更新文件</small>
+                <input type="hidden" id="versionUrl" value="">
             </div>
             <div class="form-group">
                 <label><i class="fas fa-folder-open"></i> 选择 Alist 文件</label>
@@ -1487,16 +1480,6 @@
                 <label><i class="fas fa-tag"></i> 版本号 <span style="color: var(--danger);">*</span></label>
                 <input type="text" id="editVersionNumber" placeholder="格式: 1.0.0 或 1.2.3.4" pattern="^\d+(\.\d+){0,3}$" title="请输入有效的版本号" required>
                 <small style="color: var(--gray);">版本号格式: X.Y.Z 或 X.Y.Z.W</small>
-            </div>
-            <div class="form-group">
-                <label><i class="fas fa-link"></i> 下载链接 <span style="color: var(--danger);">*</span></label>
-                <div class="url-input-wrapper">
-                    <input type="url" id="editVersionUrl" placeholder="点击下方文件自动填充，或手动输入" title="请输入有效的下载链接" required>
-                    <button type="button" class="clear-url-btn" onclick="document.getElementById('editVersionUrl').value=''" title="清空">
-                        <i class="fas fa-times"></i>
-                    </button>
-                </div>
-                <small style="color: var(--gray);">客户端将从此链接下载更新文件</small>
             </div>
             <div class="form-group">
                 <label><i class="fas fa-folder-open"></i> 选择 Alist 文件</label>
