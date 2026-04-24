@@ -1654,22 +1654,18 @@ function renderVersionsTable(versions) {
 
     versions.forEach(version => {
         const isActive = version.is_active;
+        // 定义激活状态的徽章
         const activeBadge = isActive
             ? '<span class="status-badge status-online" style="font-weight:600;">已激活</span>'
             : '<span class="status-badge status-offline">未激活</span>';
 
-        // 已激活的版本只显示标识，未激活的显示“设为激活”按钮
+        // 已激活的版本只显示取消激活按钮，未激活的显示“设为激活”按钮
         const actionBtn = isActive
-        ? `<div>
-            <button class="btn btn-sm btn-warning" onclick="deactivateVersion()">取消激活</button>
-            <label style="margin-left: 0.5rem; font-size:0.8rem;">
-                <input type="checkbox" ${version.force_update ? 'checked' : ''} 
-                    onchange="toggleForceUpdate('${escapeHtml(version.version)}', this.checked)">
-                强制更新
-            </label>
-        </div>`
-        : `<button class="btn btn-sm btn-primary" onclick="setActiveVersion('${escapeHtml(version.version)}')">设为激活</button>`;
-                
+            ? `<div>
+                <button class="btn btn-sm btn-warning" onclick="deactivateVersion()">取消激活</button>
+               </div>`
+            : `<button class="btn btn-sm btn-primary" onclick="setActiveVersion('${escapeHtml(version.version)}')">设为激活</button>`;
+
         html += `
             <tr>
                 <td><strong>${escapeHtml(version.version)}</strong></td>
@@ -1681,11 +1677,7 @@ function renderVersionsTable(versions) {
         `;
     });
 
-    html += `
-            </tbody>
-        </table>
-    `;
-
+    html += `</tbody></table>`;
     container.innerHTML = html;
 }
 
@@ -1735,24 +1727,5 @@ async function setActiveVersion(version) {
     } catch (error) {
         console.error('设置激活版本失败:', error);
         showToast('设置激活版本失败：' + error.message, 'error');
-    }
-}
-
-async function toggleForceUpdate(version, forceUpdate) {
-    try {
-        const response = await fetch('/api/update/force_update', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ version, force_update: forceUpdate })
-        });
-        const data = await response.json();
-        if (data.code === 200) {
-            showToast(`强制更新标志已${forceUpdate ? '开启' : '关闭'}`, 'success');
-            loadVersions(); // 刷新列表
-        } else {
-            showToast(data.message || '操作失败', 'error');
-        }
-    } catch (error) {
-        showToast('请求失败', 'error');
     }
 }

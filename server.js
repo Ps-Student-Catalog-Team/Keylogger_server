@@ -722,7 +722,6 @@ async function initDatabase() {
                 version VARCHAR(20) NOT NULL UNIQUE COMMENT '版本号，如 1.0.1',
                 download_url TEXT NOT NULL COMMENT '下载链接',
                 is_active BOOLEAN DEFAULT FALSE COMMENT '是否为当前激活版本',
-                force_update BOOLEAN DEFAULT FALSE COMMENT '是否强制更新',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -1467,15 +1466,14 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
             return supportedExtensions.some(ext => lowerFilename.endsWith(ext));
         });
 
-        // 从数据库获取所有版本的激活状态
+        // 修复 SQL 语法：移除 is_active 后的多余逗号
         const dbVersions = await executeWithRetry(
-            'SELECT version, is_active, force_update FROM client_versions', []
+            'SELECT version, is_active FROM client_versions', []
         );
         const dbVersionMap = {};
         for (const row of dbVersions) {
             dbVersionMap[row.version] = {
-                is_active: row.is_active,
-                force_update: row.force_update
+                is_active: row.is_active
             };
         }
 
@@ -1498,24 +1496,22 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
             } catch (error) {
                 downloadUrl = `${CONFIG.alist.url}/d${versionPath}/${encodeURIComponent(file.filename)}`;
             }
-
             try {
                 await executeWithRetry(
-                    'INSERT IGNORE INTO client_versions (version, download_url, is_active, force_update) VALUES (?, ?, ?, ?)',
-                    [version, downloadUrl, false, false]
+                    'INSERT IGNORE INTO client_versions (version, download_url, is_active) VALUES (?, ?, ?)',
+                    [version, downloadUrl, false]
                 );
             } catch (dbError) {
                 logger.warn('数据库插入版本失败', { error: dbError.message });
             }
 
-            const dbInfo = dbVersionMap[version] || { is_active: false, force_update: false };
+            const dbInfo = dbVersionMap[version] || { is_active: false };
 
             return {
                 version,
                 downloadUrl,
                 filename: file.filename,
-                is_active: dbInfo.is_active,
-                force_update: dbInfo.force_update
+                is_active: dbInfo.is_active
             };
         }));
 
@@ -1526,7 +1522,6 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
             }
         });
 
-        // 缓存结果（深拷贝）
         versionCache.set(cacheKey, JSON.parse(JSON.stringify(versions)));
 
         logger.info(`版本列表生成完成，共 ${versions.length} 个版本`);
@@ -1544,7 +1539,7 @@ app.get('/api/update/check', asyncHandler(async (req, res) => {
     try {
         // 首先检查数据库中是否有激活的版本
         const activeVersionRows = await executeWithRetry(
-            'SELECT version, download_url, force_update FROM client_versions WHERE is_active = TRUE LIMIT 1'
+            'SELECT version, download_urlFROM client_versions WHERE is_active = TRUE LIMIT 1'
         );
         
         if (activeVersionRows.length > 0) {
@@ -1554,8 +1549,7 @@ app.get('/api/update/check', asyncHandler(async (req, res) => {
                 code: 200, 
                 data: { 
                     version: activeVersion.version, 
-                    download_url: activeVersion.download_url,
-                    force_update: activeVersion.force_update
+                    download_url: activeVersion.download_url
                 } 
             });
         }
@@ -1567,7 +1561,6 @@ app.get('/api/update/check', asyncHandler(async (req, res) => {
             data: {
                 version: '',
                 download_url: '',
-                force_update: false
             }
         });
         
@@ -1600,12 +1593,11 @@ app.post('/api/update/deactivate', asyncHandler(async (req, res) => {
 
 app.post('/api/update/set_version', asyncHandler(async (req, res) => {
     try {
-        const { version, force_update = false } = req.body;
+        const { version } = req.body;
         if (!version) {
             return res.json({ code: 400, message: '版本号不能为空' });
         }
         
-        // 检查版本是否存在
         const existingRows = await executeWithRetry(
             'SELECT id FROM client_versions WHERE version = ?',
             [version]
@@ -1621,24 +1613,23 @@ app.post('/api/update/set_version', asyncHandler(async (req, res) => {
             
             // 将所有版本设置为非激活
             await connection.execute('UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE');
-            // 将指定版本设置为激活
+            // 将指定版本设置为激活（不再包含 force_update）
             await connection.execute(
-                'UPDATE client_versions SET is_active = TRUE, force_update = ? WHERE version = ?',
-                [force_update, version]
+                'UPDATE client_versions SET is_active = TRUE WHERE version = ?',
+                [version]
             );
             
             await connection.commit();
-            logger.info(`设置版本 ${version} 为激活状态，强制更新: ${force_update}`);
+            logger.info(`设置版本 ${version} 为激活状态`);
             
-            // 清除版本缓存
             versionCache.delete('version_list');
             
-            res.json({ code: 200, message: '版本设置成功', data: { version, force_update } });
+            res.json({ code: 200, message: '版本设置成功', data: { version } });
         } catch (txError) {
             if (connection) await connection.rollback();
             throw txError;
         } finally {
-            if (connection) connection.release();   // 关键：释放连接
+            if (connection) connection.release();
         }
     } catch (error) {
         logger.error('设置版本失败', { error: error.message });
@@ -1647,36 +1638,6 @@ app.post('/api/update/set_version', asyncHandler(async (req, res) => {
 }));
 
 
-app.post('/api/update/force_update', asyncHandler(async (req, res) => {
-    const { version, force_update } = req.body;
-    
-    if (!version) {
-        return res.status(400).json({ code: 400, message: '版本号不能为空' });
-    }
-    if (typeof force_update !== 'boolean') {
-        return res.status(400).json({ code: 400, message: 'force_update 必须是布尔值' });
-    }
-
-    try {
-        const [result] = await pool.execute(
-            'UPDATE client_versions SET force_update = ? WHERE version = ?',
-            [force_update, version]
-        );
-        
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ code: 404, message: '版本不存在' });
-        }
-        
-        // 清除版本缓存，使下次刷新重新加载
-        versionCache.delete('version_list');
-        
-        auditLogger.info(`修改版本 ${version} 的强制更新标志为 ${force_update}`, { user: req.user });
-        res.json({ code: 200, message: '修改成功', data: { version, force_update } });
-    } catch (error) {
-        logger.error('修改强制更新标志失败', { error: error.message });
-        res.status(500).json({ code: 500, message: '数据库操作失败' });
-    }
-}));
 
 // 版本号比较函数
 function compareVersions(v1, v2) {
