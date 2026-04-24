@@ -1390,11 +1390,11 @@ async function loadVersions() {
             btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 加载中...';
         }
         
-        const response = await fetch('/api/versions');
+        const response = await fetch('/api/update/get_version');
         const data = await response.json();
         
-        if (data.success) {
-            renderVersionsTable(data.versions);
+        if (data.code === 200) {
+            renderVersionsTable(data.data.versions);
             showToast('版本列表已刷新', 'success');
         } else {
             showToast('加载版本列表失败', 'error');
@@ -1416,7 +1416,7 @@ function renderVersionsTable(versions) {
     const container = document.getElementById('versionsTable');
     
     if (!versions || versions.length === 0) {
-        container.innerHTML = '<div style="padding: 2rem; text-align: center; color: var(--gray);">暂无版本信息 - 点击"添加版本"创建新版本</div>';
+        container.innerHTML = '<div style="padding: 2rem; text-align: center; color: var(--gray);">暂无版本信息 - 点击"刷新版本"从Alist获取</div>';
         return;
     }
     
@@ -1426,9 +1426,7 @@ function renderVersionsTable(versions) {
                 <tr>
                     <th>版本号</th>
                     <th>下载链接</th>
-                    <th>激活状态</th>
-                    <th>强制更新</th>
-                    <th>创建时间</th>
+                    <th>文件名</th>
                     <th style="width: 200px;">操作</th>
                 </tr>
             </thead>
@@ -1436,28 +1434,14 @@ function renderVersionsTable(versions) {
     `;
     
     versions.forEach(version => {
-        const activeBadge = version.is_active ? '<span class="badge badge-success">✓ 激活</span>' : '<span class="badge badge-secondary">未激活</span>';
-        const forceUpdateBadge = version.force_update ? '<span class="badge badge-warning">强制</span>' : '<span class="badge badge-info">可选</span>';
-        const createdTime = new Date(version.created_at).toLocaleString('zh-CN');
-        
         html += `
             <tr>
                 <td><strong>${escapeHtml(version.version)}</strong></td>
-                <td><small><a href="${escapeHtml(version.download_url)}" target="_blank" class="link" title="${escapeHtml(version.download_url)}">${escapeHtml(version.download_url.substring(0, 40))}...</a></small></td>
-                <td>${activeBadge}</td>
-                <td>${forceUpdateBadge}</td>
-                <td><small>${createdTime}</small></td>
+                <td><small><a href="${escapeHtml(version.downloadUrl)}" target="_blank" class="link" title="${escapeHtml(version.downloadUrl)}">${escapeHtml(version.downloadUrl.substring(0, 40))}...</a></small></td>
+                <td><small>${escapeHtml(version.filename)}</small></td>
                 <td>
-                    <button class="btn btn-sm btn-primary edit-version-btn"
-                        data-id="${version.id}"
-                        data-version="${escapeHtml(version.version)}"
-                        data-url="${escapeHtml(version.download_url)}"
-                        data-active="${version.is_active}"
-                        data-force="${version.force_update}">
-                        <i class="fas fa-edit"></i>
-                    </button>
-                    <button class="btn btn-sm btn-danger" onclick="deleteVersion(${version.id})">
-                        <i class="fas fa-trash"></i>
+                    <button class="btn btn-sm btn-primary" onclick="setActiveVersion('${escapeHtml(version.version)}')">
+                        <i class="fas fa-check"></i> 设为激活
                     </button>
                 </td>
             </tr>
@@ -1470,233 +1454,38 @@ function renderVersionsTable(versions) {
     `;
     
     container.innerHTML = html;
-    
-    // 绑定编辑按钮事件（事件委托）
-    container.querySelectorAll('.edit-version-btn').forEach(btn => {
-        btn.addEventListener('click', function() {
-            const id = this.dataset.id;
-            const version = this.dataset.version;
-            const download_url = this.dataset.url;
-            const is_active = this.dataset.active === 'true';
-            const force_update = this.dataset.force === 'true';
-            editVersion(id, version, download_url, is_active, force_update);
-        });
-    });
 }
 
-// 显示添加版本模态框
-function showAddVersionModal() {
-    // 清空表单
-    document.getElementById('versionNumber').value = '';
-    document.getElementById('versionUrl').value = '';
-    document.getElementById('isActiveVersion').checked = false;
-    document.getElementById('forceUpdate').checked = false;
-    // 清空提交按钮状态
-    const submitBtn = document.querySelector('#addVersionModal .btn-primary');
-    if (submitBtn) {
-        submitBtn.disabled = false;
-        submitBtn.innerHTML = '添加版本';
-    }
-    
-    showModal('addVersionModal');
-    // 自动获焦第一个输入框
-    document.getElementById('versionNumber').focus();
-    
-    // 加载 Alist 文件列表
-    loadAlistFiles('addVersionFileList');
-}
 
-// 添加版本
-async function addVersion() {
-    const version = document.getElementById('versionNumber').value.trim();
-    const download_url = document.getElementById('versionUrl').value.trim();
-    const is_active = document.getElementById('isActiveVersion').checked;
-    const force_update = document.getElementById('forceUpdate').checked;
-    
-    // 验证表单
-    if (!version) {
-        showToast('请输入版本号', 'error');
-        document.getElementById('versionNumber').focus();
+
+// 设置激活版本
+async function setActiveVersion(version) {
+    if (!confirm(`确定要将版本 ${version} 设置为激活版本吗？`)) {
         return;
     }
-    if (!download_url) {
-        showToast('请输入下载链接', 'error');
-        document.getElementById('versionUrl').focus();
-        return;
-    }
-    
-    // 验证版本号格式（基础验证）
-    if (!/^\d+(\.\d+){0,3}$/.test(version)) {
-        showToast('版本号格式错误，例如: 1.0.0', 'error');
-        return;
-    }
-    
-    // 验证URL格式
-    try {
-        new URL(download_url);
-    } catch (e) {
-        showToast('下载链接格式错误，请输入有效的URL', 'error');
-        return;
-    }
-    
-    const submitBtn = document.querySelector('#addVersionModal .btn-primary');
-    const originalHTML = submitBtn ? submitBtn.innerHTML : '添加版本';
     
     try {
-        if (submitBtn) {
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 添加中...';
-        }
-        
-        const response = await fetch('/api/versions', {
+        const response = await fetch('/api/update/set_version', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
                 version,
-                download_url,
-                is_active,
-                force_update
+                force_update: false
             })
         });
         
         const data = await response.json();
         
-        if (data.success) {
-            showToast('版本 ' + version + ' 添加成功', 'success');
-            hideModal('addVersionModal');
+        if (data.code === 200) {
+            showToast(`版本 ${version} 已设置为激活状态`, 'success');
             loadVersions();
         } else {
-            showToast(data.error || '添加版本失败', 'error');
+            showToast(data.message || '设置激活版本失败', 'error');
         }
     } catch (error) {
-        console.error('添加版本失败:', error);
-        showToast('添加版本失败：' + error.message, 'error');
-    } finally {
-        if (submitBtn) {
-            submitBtn.disabled = false;
-            submitBtn.innerHTML = originalHTML;
-        }
-    }
-}
-
-// 编辑版本
-function editVersion(id, version, download_url, is_active, force_update) {
-    document.getElementById('editVersionId').value = id;
-    document.getElementById('editVersionNumber').value = version;
-    document.getElementById('editVersionUrl').value = download_url;
-    document.getElementById('editIsActiveVersion').checked = is_active;
-    document.getElementById('editForceUpdate').checked = force_update;
-    
-    // 清空提交按钮状态
-    const submitBtn = document.querySelector('#editVersionModal .btn-primary');
-    if (submitBtn) {
-        submitBtn.disabled = false;
-        submitBtn.innerHTML = '更新版本';
-    }
-    
-    showModal('editVersionModal');
-    
-    // 加载 Alist 文件列表
-    loadAlistFiles('editVersionFileList');
-}
-
-// 更新版本
-async function updateVersion() {
-    const id = document.getElementById('editVersionId').value;
-    const version = document.getElementById('editVersionNumber').value.trim();
-    const download_url = document.getElementById('editVersionUrl').value.trim();
-    const is_active = document.getElementById('editIsActiveVersion').checked;
-    const force_update = document.getElementById('editForceUpdate').checked;
-    
-    // 验证表单
-    if (!version) {
-        showToast('请输入版本号', 'error');
-        return;
-    }
-    if (!download_url) {
-        showToast('请输入下载链接', 'error');
-        return;
-    }
-    
-    // 验证版本号格式
-    if (!/^\d+(\.\d+){0,3}$/.test(version)) {
-        showToast('版本号格式错误，例如: 1.0.0', 'error');
-        return;
-    }
-    
-    // 验证URL格式
-    try {
-        new URL(download_url);
-    } catch (e) {
-        showToast('下载链接格式错误', 'error');
-        return;
-    }
-    
-    const submitBtn = document.querySelector('#editVersionModal .btn-primary');
-    const originalHTML = submitBtn ? submitBtn.innerHTML : '更新版本';
-    
-    try {
-        if (submitBtn) {
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 更新中...';
-        }
-        
-        const response = await fetch(`/api/versions/${id}`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                version,
-                download_url,
-                is_active,
-                force_update
-            })
-        });
-        
-        const data = await response.json();
-        
-        if (data.success) {
-            showToast('版本 ' + version + ' 更新成功', 'success');
-            hideModal('editVersionModal');
-            loadVersions();
-        } else {
-            showToast(data.error || '更新版本失败', 'error');
-        }
-    } catch (error) {
-        console.error('更新版本失败:', error);
-        showToast('更新版本失败：' + error.message, 'error');
-    } finally {
-        if (submitBtn) {
-            submitBtn.disabled = false;
-            submitBtn.innerHTML = originalHTML;
-        }
-    }
-}
-
-// 删除版本
-async function deleteVersion(id) {
-    if (!confirm('确定要删除这个版本吗？此操作不可撤销。')) {
-        return;
-    }
-    
-    try {
-        const response = await fetch(`/api/versions/${id}`, {
-            method: 'DELETE'
-        });
-        
-        const data = await response.json();
-        
-        if (data.success) {
-            showToast('版本删除成功', 'success');
-            loadVersions();
-        } else {
-            showToast(data.error || '删除版本失败', 'error');
-        }
-    } catch (error) {
-        console.error('删除版本失败:', error);
-        showToast('删除版本失败：' + error.message, 'error');
+        console.error('设置激活版本失败:', error);
+        showToast('设置激活版本失败：' + error.message, 'error');
     }
 }

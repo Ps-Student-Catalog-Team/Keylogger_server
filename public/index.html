@@ -1294,14 +1294,11 @@
                 <div class="card">
                     <h3><i class="fas fa-mobile-alt"></i> 客户端版本管理</h3>
                     <p style="color: var(--gray); margin-bottom: 1rem; font-size: 0.9rem;">
-                        在这里添加和管理客户端版本。激活的版本将在客户端请求更新时自动下发。
+                        从Alist获取客户端版本并管理激活状态。激活的版本将在客户端请求更新时自动下发。
                     </p>
-                    <div class="form-group" style="display: flex; gap: 1rem; margin-bottom: 1.5rem;">
-                        <button class="btn btn-primary" onclick="loadVersions()" style="flex: 1;">
-                            <i class="fas fa-sync-alt"></i> 刷新版本列表
-                        </button>
-                        <button class="btn btn-success" onclick="showAddVersionModal()" style="flex: 1;">
-                            <i class="fas fa-plus-circle"></i> 添加新版本
+                    <div class="form-group" style="margin-bottom: 1.5rem;">
+                        <button class="btn btn-primary" onclick="loadVersions()" style="width: 100%;">
+                            <i class="fas fa-sync-alt"></i> 从Alist刷新版本列表
                         </button>
                     </div>
                     <div id="versionsTable"></div>
@@ -1422,95 +1419,7 @@
         </div>
     </div>
 
-    <!-- 添加版本模态框 -->
-    <div class="modal" id="addVersionModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>添加新版本</h3>
-                <button class="close-btn" onclick="hideModal('addVersionModal')">&times;</button>
-            </div>
-            <div class="form-group">
-                <label><i class="fas fa-tag"></i> 版本号 <span style="color: var(--danger);">*</span></label>
-                <input type="text" id="versionNumber" placeholder="格式: 1.0.0 或 1.2.3.4" pattern="^\d+(\.\d+){0,3}$" title="请输入有效的版本号，如 1.0.0" required>
-                <small style="color: var(--gray);">版本号格式: X.Y.Z 或 X.Y.Z.W</small>
-            </div>
-            <div class="form-group">
-                <input type="hidden" id="versionUrl" value="">
-            </div>
-            <div class="form-group">
-                <label><i class="fas fa-folder-open"></i> 选择 Alist 文件</label>
-                <div id="addVersionFileList" class="file-list-container">
-                    <div class="loading">加载中...</div>
-                </div>
-            </div>
-            <div class="form-group">
-                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                    <input type="checkbox" id="isActiveVersion" style="width: auto;"> 
-                    <span><i class="fas fa-star"></i> 设置为当前激活版本</span>
-                </label>
-                <small style="color: var(--gray);">激活版本将在客户端检查更新时下发</small>
-            </div>
-            <div class="form-group">
-                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                    <input type="checkbox" id="forceUpdate" style="width: auto;"> 
-                    <span><i class="fas fa-exclamation-circle"></i> 强制更新</span>
-                </label>
-                <small style="color: var(--gray);">启用后，客户端必须更新才能继续使用</small>
-            </div>
-            <div class="form-group" style="display: flex; gap: 1rem;">
-                <button class="btn btn-primary" onclick="addVersion()" style="flex: 1;">
-                    <i class="fas fa-plus"></i> 添加版本
-                </button>
-                <button class="btn btn-secondary" onclick="hideModal('addVersionModal')" style="flex: 1;">
-                    <i class="fas fa-times"></i> 取消
-                </button>
-            </div>
-        </div>
-    </div>
 
-    <!-- 编辑版本模态框 -->
-    <div class="modal" id="editVersionModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>编辑版本</h3>
-                <button class="close-btn" onclick="hideModal('editVersionModal')">&times;</button>
-            </div>
-            <input type="hidden" id="editVersionId">
-            <div class="form-group">
-                <label><i class="fas fa-tag"></i> 版本号 <span style="color: var(--danger);">*</span></label>
-                <input type="text" id="editVersionNumber" placeholder="格式: 1.0.0 或 1.2.3.4" pattern="^\d+(\.\d+){0,3}$" title="请输入有效的版本号" required>
-                <small style="color: var(--gray);">版本号格式: X.Y.Z 或 X.Y.Z.W</small>
-            </div>
-            <div class="form-group">
-                <label><i class="fas fa-folder-open"></i> 选择 Alist 文件</label>
-                <div id="editVersionFileList" class="file-list-container">
-                    <div class="loading">加载中...</div>
-                </div>
-            </div>
-            <div class="form-group">
-                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                    <input type="checkbox" id="editIsActiveVersion" style="width: auto;"> 
-                    <span><i class="fas fa-star"></i> 设置为当前激活版本</span>
-                </label>
-                <small style="color: var(--gray);">激活版本将在客户端检查更新时下发</small>
-            </div>
-            <div class="form-group">
-                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                    <input type="checkbox" id="editForceUpdate" style="width: auto;"> 
-                    <span><i class="fas fa-exclamation-circle"></i> 强制更新</span>
-                </label>
-                <small style="color: var(--gray);">启用后，客户端必须更新才能继续使用</small>
-            </div>
-            <div class="form-group" style="display: flex; gap: 1rem;">
-                <button class="btn btn-primary" onclick="updateVersion()" style="flex: 1;">
-                    <i class="fas fa-save"></i> 更新版本
-                </button>
-                <button class="btn btn-secondary" onclick="hideModal('editVersionModal')" style="flex: 1;">
-                    <i class="fas fa-times"></i> 取消
-                </button>
-            </div>
-        </div>
-    </div>
 
     <!-- 日志查看模态框 -->
     <div class="modal" id="logModal">
