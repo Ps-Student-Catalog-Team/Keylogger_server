@@ -1372,7 +1372,19 @@ app.get('/api/clients', (req, res) => {
 app.get('/api/update/get_version', asyncHandler(async (req, res) => {
     try {
         // 从alist获取文件列表
-        const allFiles = await alistClient.listFiles(alistClient.basePath);
+        let allFiles = [];
+        try {
+            allFiles = await alistClient.listFiles(alistClient.basePath);
+        } catch (alistError) {
+            logger.warn('Alist 连接失败，返回空版本列表', { error: alistError.message });
+            return res.json({
+                code: 200,
+                data: {
+                    versions: [],
+                    count: 0
+                }
+            });
+        }
         
         // 过滤出keylogger应用程序文件（假设文件名包含keylogger且为可执行文件）
         const keyloggerFiles = allFiles.filter(file => 
@@ -1424,8 +1436,11 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
     } catch (error) {
         logger.error('获取版本列表失败', { error: error.message, stack: error.stack });
         return res.json({
-            code: 500,
-            message: '获取版本列表失败'
+            code: 200,
+            data: {
+                versions: [],
+                count: 0
+            }
         });
     }
 }));
