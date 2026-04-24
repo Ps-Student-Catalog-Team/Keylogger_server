@@ -2088,7 +2088,7 @@ app.post('/api/versions', asyncHandler(async (req, res) => {
     try {
         await connection.beginTransaction();
         
-        // 检查版本是否已存在
+        // 检查版本是否已存在（使用 INSERT IGNORE 避免并发冲突）
         const [existing] = await connection.execute(
             'SELECT id FROM client_versions WHERE version = ?',
             [version]
@@ -2098,15 +2098,21 @@ app.post('/api/versions', asyncHandler(async (req, res) => {
             return res.status(400).json({ error: '版本已存在，请勿重复添加' });
         }
         
+        // 使用 INSERT IGNORE 防止并发唯一键冲突
+        const [result] = await connection.execute(
+            'INSERT IGNORE INTO client_versions (version, download_url, is_active, force_update) VALUES (?, ?, ?, ?)',
+            [version, download_url, is_active || false, force_update || false]
+        );
+        
+        if (result.affectedRows === 0) {
+            await connection.rollback();
+            return res.status(400).json({ error: '版本已存在或添加失败' });
+        }
+        
         // 如果设置为激活状态，先取消其他版本的激活状态
         if (is_active) {
             await connection.execute('UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE');
         }
-        
-        const [result] = await connection.execute(
-            'INSERT INTO client_versions (version, download_url, is_active, force_update) VALUES (?, ?, ?, ?)',
-            [version, download_url, is_active || false, force_update || false]
-        );
         
         await connection.commit();
         

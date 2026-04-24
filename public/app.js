@@ -38,6 +38,8 @@ function normalizePassword(value) {
     let normalized = String(value).trim();
     // 移除所有空格和换行符
     normalized = normalized.replace(/\s+/g, '');
+    // 移除特殊字符，与后端保持一致
+    normalized = normalized.replace(/[^\w!@#$%^&*()_+\-=\[\]{}|;':",./<>?`~]/g, '');
     return normalized;
 }
 
@@ -60,7 +62,13 @@ function sortClients(clients) {
     return [...clients].sort((a, b) => {
         if (a.status === 'online' && b.status !== 'online') return -1;
         if (a.status !== 'online' && b.status === 'online') return 1;
-        return a.ip.localeCompare(b.ip);
+        // IP 地址按数值排序（将 IP 转换为数字）
+        const ipToNum = (ip) => {
+            const parts = ip.split('.');
+            if (parts.length !== 4) return 0;
+            return parts.reduce((acc, part, idx) => acc + parseInt(part, 10) * Math.pow(256, 3 - idx), 0);
+        };
+        return ipToNum(a.ip) - ipToNum(b.ip);
     });
 }
 
@@ -117,7 +125,14 @@ function connectWebSocket() {
     ws.onclose = (event) => {
         dom.wsStatus.classList.remove('connected');
         dom.wsStatusText.textContent = '已断开';
-        ws = null;
+        // 完全清理 WebSocket 状态
+        if (ws) {
+            ws.onopen = null;
+            ws.onclose = null;
+            ws.onerror = null;
+            ws.onmessage = null;
+            ws = null;
+        }
         console.warn('WebSocket 关闭:', event.code, event.reason);
 
         if (isUnloading) return;
@@ -1010,7 +1025,8 @@ async function viewLatestPasswords() {
             
             // 获取黑名单并过滤当前提取结果
             try {
-                const blacklistResponse = await fetch('/api/blacklist');
+                // 获取全部黑名单（不分页），确保过滤完整
+                const blacklistResponse = await fetch('/api/blacklist?page=1&limit=10000');
                 if (blacklistResponse.ok) {
                     const data = await blacklistResponse.json();
                     const blacklistSet = new Set((data.blacklist || []).map(item => normalizePassword(item.password)));
