@@ -1584,17 +1584,18 @@ async function loadVersions() {
 // 渲染版本表格
 function renderVersionsTable(versions) {
     const container = document.getElementById('versionsTable');
-    
+
     if (!versions || versions.length === 0) {
         container.innerHTML = '<div style="padding: 2rem; text-align: center; color: var(--gray);">暂无版本信息 - 点击"刷新版本"从Alist获取</div>';
         return;
     }
-    
+
     let html = `
         <table class="table">
             <thead>
                 <tr>
                     <th>版本号</th>
+                    <th>激活状态</th>
                     <th>下载链接</th>
                     <th>文件名</th>
                     <th style="width: 200px;">操作</th>
@@ -1602,31 +1603,57 @@ function renderVersionsTable(versions) {
             </thead>
             <tbody>
     `;
-    
+
     versions.forEach(version => {
+        const isActive = version.is_active;
+        const activeBadge = isActive
+            ? '<span class="status-badge status-online" style="font-weight:600;">已激活</span>'
+            : '<span class="status-badge status-offline">未激活</span>';
+
+        // 已激活的版本只显示标识，未激活的显示“设为激活”按钮
+        const actionBtn = isActive
+            ? `<button class="btn btn-sm btn-warning" onclick="deactivateVersion()">
+                <i class="fas fa-times"></i> 取消激活
+            </button>`
+            : `<button class="btn btn-sm btn-primary" onclick="setActiveVersion('${escapeHtml(version.version)}')">
+                <i class="fas fa-check"></i> 设为激活
+            </button>`;
+            
         html += `
             <tr>
                 <td><strong>${escapeHtml(version.version)}</strong></td>
+                <td>${activeBadge}</td>
                 <td><small><a href="${escapeHtml(version.downloadUrl)}" target="_blank" class="link" title="${escapeHtml(version.downloadUrl)}">${escapeHtml(version.downloadUrl.substring(0, 40))}...</a></small></td>
                 <td><small>${escapeHtml(version.filename)}</small></td>
-                <td>
-                    <button class="btn btn-sm btn-primary" onclick="setActiveVersion('${escapeHtml(version.version)}')">
-                        <i class="fas fa-check"></i> 设为激活
-                    </button>
-                </td>
+                <td>${actionBtn}</td>
             </tr>
         `;
     });
-    
+
     html += `
             </tbody>
         </table>
     `;
-    
+
     container.innerHTML = html;
 }
 
-
+// 前端调用函数
+async function deactivateVersion() {
+    if (!confirm('确定要取消当前激活的版本吗？')) return;
+    try {
+        const response = await fetch('/api/update/deactivate', { method: 'POST' });
+        const data = await response.json();
+        if (data.code === 200) {
+            showToast('已取消激活', 'success');
+            loadVersions();
+        } else {
+            showToast(data.message || '取消激活失败', 'error');
+        }
+    } catch (error) {
+        showToast('取消激活请求失败', 'error');
+    }
+}
 
 // 设置激活版本
 async function setActiveVersion(version) {
