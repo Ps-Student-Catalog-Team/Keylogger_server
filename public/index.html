@@ -1278,6 +1278,18 @@
             <!-- 系统信息页面 -->
             <div id="settingsPage" class="page" style="display: none;">
                 <div class="card">
+                    <h3><i class="fas fa-mobile-alt"></i> 客户端版本管理</h3>
+                    <p style="color: var(--gray); margin-bottom: 1rem; font-size: 0.9rem;">
+                        从Alist获取客户端版本并管理激活状态。激活的版本将在客户端请求更新时自动下发。
+                    </p>
+                    <div class="form-group" style="margin-bottom: 1.5rem;">
+                        <button class="btn btn-primary" onclick="loadVersions()" style="width: 100%;">
+                            <i class="fas fa-sync-alt"></i> 从Alist刷新版本列表
+                        </button>
+                    </div>
+                    <div id="versionsTable"></div>
+                </div>
+                <div class="card">
                     <h3>系统信息</h3>
                     <div class="form-group">
                         <label>心跳检测间隔 (毫秒)</label>
@@ -1290,18 +1302,6 @@
                     <button class="btn btn-primary" onclick="saveSettings()">
                         <i class="fas fa-save"></i> 保存设置
                     </button>
-                </div>
-                <div class="card">
-                    <h3><i class="fas fa-mobile-alt"></i> 客户端版本管理</h3>
-                    <p style="color: var(--gray); margin-bottom: 1rem; font-size: 0.9rem;">
-                        从Alist获取客户端版本并管理激活状态。激活的版本将在客户端请求更新时自动下发。
-                    </p>
-                    <div class="form-group" style="margin-bottom: 1.5rem;">
-                        <button class="btn btn-primary" onclick="loadVersions()" style="width: 100%;">
-                            <i class="fas fa-sync-alt"></i> 从Alist刷新版本列表
-                        </button>
-                    </div>
-                    <div id="versionsTable"></div>
                 </div>
                 <div class="card">
                     <h3>关于</h3>

