@@ -141,6 +141,13 @@ function connectWebSocket() {
         dom.wsStatus.classList.remove('connected');
         dom.wsStatusText.textContent = '已断开';
         
+        // 清理所有连接中的客户端状态
+        connectingClients.clear();
+        if (window.connectTimeouts) {
+            window.connectTimeouts.forEach(timeoutId => clearTimeout(timeoutId));
+            window.connectTimeouts.clear();
+        }
+        
         // 完全清理 WebSocket 状态
         if (ws) {
             ws.onopen = null;
@@ -275,26 +282,6 @@ function handleWebSocketMessage(data) {
                 renderClientsTable();
             }
             showToast('连接失败: ' + (data.message || '未知错误'), 'error');
-            break;
-            if (data.clientId) {
-                if (window.connectTimeouts && window.connectTimeouts.has(data.clientId)) {
-                    clearTimeout(window.connectTimeouts.get(data.clientId));
-                    window.connectTimeouts.delete(data.clientId);
-                }
-                connectingClients.delete(data.clientId);
-                renderClientsTable();
-            }
-            showToast('连接失败: ' + (data.message || '未知错误'), 'error');
-            break;
-            if (data.clientId) {
-                if (window.connectTimeouts && window.connectTimeouts.has(data.clientId)) {
-                    clearTimeout(window.connectTimeouts.get(data.clientId));
-                    window.connectTimeouts.delete(data.clientId);
-                }
-                connectingClients.delete(data.clientId);
-                renderClientsTable();
-            }
-            showToast('连接失败: ' + data.message, 'error');
             break;
         case 'disconnect_result':
             if (data.success) {

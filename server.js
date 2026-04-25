@@ -960,24 +960,29 @@ class ClientManager {
     startHeartbeat() {
         const limit = pLimit(CONFIG.heartbeatConcurrency);
         this.heartbeatTimer = setInterval(() => {
-            const heartbeatTasks = [];
-            this.clients.forEach((client, clientId) => {
+            // 创建快照避免遍历时修改导致的竞态条件
+            const onlineClients = [];
+            for (const [clientId, client] of this.clients) {
                 if (client.status === 'online') {
-                    heartbeatTasks.push(limit(async () => {
-                        try {
-                            const result = await this.sendCommand(clientId, { action: 'ping' });
-                            if (!result.success) {
-                                this.logger.warn(`心跳失败: ${clientId}`);
-                                this.markClientOffline(client);
-                                this.reconnectSingleClient(clientId).catch(e => this.logger.error(e));
-                            }
-                        } catch (e) {
-                            this.logger.warn(`心跳异常: ${clientId}`, { error: e.message });
+                    onlineClients.push({ clientId, client });
+                }
+            }
+            
+            const heartbeatTasks = onlineClients.map(({ clientId, client }) => {
+                return limit(async () => {
+                    try {
+                        const result = await this.sendCommand(clientId, { action: 'ping' });
+                        if (!result.success) {
+                            this.logger.warn(`心跳失败: ${clientId}`);
                             this.markClientOffline(client);
                             this.reconnectSingleClient(clientId).catch(e => this.logger.error(e));
                         }
-                    }));
-                }
+                    } catch (e) {
+                        this.logger.warn(`心跳异常: ${clientId}`, { error: e.message });
+                        this.markClientOffline(client);
+                        this.reconnectSingleClient(clientId).catch(e => this.logger.error(e));
+                    }
+                });
             });
             Promise.allSettled(heartbeatTasks).catch(err => this.logger.error('心跳批量任务异常', { error: err.message }));
         }, CONFIG.heartbeatInterval);
@@ -1213,10 +1218,22 @@ class ClientManager {
             const onConnect = () => {
                 socket.write(JSON.stringify({ action: 'ping' }) + '\n', (err) => {
                     if (err) return cleanup(null);
-                    const responseTimeout = setTimeout(() => cleanup(null), 2000);
+                    let responseTimeout = null;
+                    
+                    const clearResponseTimeout = () => {
+                        if (responseTimeout) {
+                            clearTimeout(responseTimeout);
+                            responseTimeout = null;
+                        }
+                    };
+                    
+                    responseTimeout = setTimeout(() => {
+                        clearResponseTimeout();
+                        cleanup(null);
+                    }, 2000);
 
                     const onData = (data) => {
-                        clearTimeout(responseTimeout);
+                        clearResponseTimeout();
                         try {
                             const msg = JSON.parse(data.toString().split('\n')[0]);
                             if (msg.status === 'ok' || msg.action === 'pong') {
