@@ -309,9 +309,9 @@ function handleWebSocketMessage(data) {
 function updateClientInList(client) {
     const index = clients.findIndex(c => c.id === client.id);
     if (index >= 0) {
-        clients[index] = client;
+        clients = [...clients.slice(0, index), client, ...clients.slice(index + 1)];
     } else {
-        clients.push(client);
+        clients = [...clients, client];
     }
     renderClientsTable();
 }

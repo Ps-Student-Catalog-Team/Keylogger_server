@@ -12,6 +12,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.1",
     "express": "^4.22.1",
+    "express-rate-limit": "^8.4.1",
     "jschardet": "^3.1.4",
     "lru-cache": "^11.3.5",
     "multer": "^1.4.5-lts.1",

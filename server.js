@@ -16,10 +16,11 @@ const DailyRotateFile = require('winston-daily-rotate-file');
 const open = require('open');
 const crypto = require('crypto');
 const { LRUCache } = require('lru-cache');
+const rateLimit = require('express-rate-limit');
 
 // ========== 版本缓存 ==========
 const versionCache = new LRUCache({
-    max: 10000, // 只缓存一个条目
+    max: 1, // 只缓存一个条目
     ttl: 1 * 60 * 1000, // 5分钟TTL
 });
 
@@ -28,21 +29,27 @@ const BLACKLIST_UPDATE_INTERVAL = 5 * 60 * 1000; // 5分钟更新一次
 const blacklistCache = new Map(); // 密码黑名单缓存
 let blacklistLastUpdate = 0; // 黑名单上次更新时间
 
+let blacklistLoading = false;
+
 async function loadBlacklistCache() {
     const now = Date.now();
     if (now - blacklistLastUpdate < BLACKLIST_UPDATE_INTERVAL && blacklistCache.size > 0) {
         return;
     }
+    if (blacklistLoading) return;   // 已在加载中，放弃本次调用
+    blacklistLoading = true;
     try {
         const blacklistedRows = await executeWithRetry('SELECT password_hash FROM password_blacklist', []);
         blacklistCache.clear();
         blacklistedRows.forEach(row => {
             blacklistCache.set(row.password_hash, true);
         });
-        blacklistLastUpdate = now;
+        blacklistLastUpdate = Date.now();
         logger.debug(`黑名单缓存已更新，共 ${blacklistedRows.length} 个条目`);
     } catch (error) {
         logger.warn('加载黑名单缓存失败', { error: error.message });
+    } finally {
+        blacklistLoading = false;
     }
 }
 
@@ -281,7 +288,7 @@ app.get('/login', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'login.html'));
 });
 
-app.post('/api/login', asyncHandler(async (req, res) => {
+app.post('/api/login', loginLimiter, asyncHandler(async (req, res) => {
     const { password } = req.body;
     const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
     
@@ -311,6 +318,15 @@ app.get('/logout', (req, res) => {
         secure
     });
     res.redirect('/login');
+});
+
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,      // 15分钟窗口
+    max: 10,                        // 最多尝试次数
+    skipSuccessfulRequests: true,   // 成功后不计入
+    message: { error: '登录尝试过于频繁，请15分钟后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 
 app.use(authMiddleware);
@@ -1088,61 +1104,80 @@ class ClientManager {
             client: this.getClientInfo(client)
         });
 
+        const toRemove = [];
+
         this.webClients.forEach(ws => {
-            if (ws.readyState === WebSocket.OPEN) {
-                if (ws.bufferedAmount > 64 * 1024) {
-                    this.logger.warn(`WebSocket 积压过高 (${ws.bufferedAmount} 字节)，延迟广播`);
-                    setTimeout(() => {
-                        if (ws.readyState === WebSocket.OPEN) {
-                            ws.send(message, (err) => {
-                                if (err) this.logger.debug('延迟广播发送失败', { error: err.message });
-                            });
-                        }
-                    }, 100);
-                    return;
-                }
-                setImmediate(() => {
-                    ws.send(message, (err) => {
-                        if (err) this.logger.debug('广播消息发送失败', { error: err.message });
-                    });
-                });
+            if (ws.readyState !== WebSocket.OPEN) {
+                toRemove.push(ws);
+                return;
             }
+
+            if (ws.bufferedAmount > 64 * 1024) {
+                this.logger.warn(`WebSocket 积压过高 (${ws.bufferedAmount} 字节)，延迟广播`);
+                setTimeout(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(message, (err) => {
+                            if (err) this.logger.debug('延迟广播发送失败', { error: err.message });
+                        });
+                    }
+                }, 100);
+                return;
+            }
+
+            setImmediate(() => {
+                ws.send(message, (err) => {
+                    if (err) this.logger.debug('广播消息发送失败', { error: err.message });
+                });
+            });
         });
+
+        toRemove.forEach(ws => this.webClients.delete(ws));
     }
 
     broadcastToWeb(data) {
         const message = JSON.stringify(data);
+        const toRemove = [];   // 收集需要断开的连接
+
         this.webClients.forEach(ws => {
-            if (ws.readyState === WebSocket.OPEN) {
-                // 如果积压超过 512KB，直接断开连接（或丢弃消息）
-                if (ws.bufferedAmount > 512 * 1024) {
-                    this.logger.warn(`WebSocket 积压过高 (${ws.bufferedAmount} 字节)，断开连接`);
-                    ws.terminate();   // 强制断开
-                    this.webClients.delete(ws);
-                    return;
-                }
-                // 如果超过 64KB 但未超过 512KB，延迟发送（可选）
-                if (ws.bufferedAmount > 64 * 1024) {
-                    this.logger.debug(`WebSocket 积压 (${ws.bufferedAmount} 字节)，延迟发送`);
-                    setTimeout(() => {
-                        if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount <= 512 * 1024) {
-                            ws.send(message, (err) => {
-                                if (err) this.logger.debug('延迟发送失败', { error: err.message });
-                            });
-                        } else if (ws.readyState === WebSocket.OPEN) {
-                            ws.terminate();
-                            this.webClients.delete(ws);
-                        }
-                    }, 100);
-                    return;
-                }
-                setImmediate(() => {
-                    ws.send(message, (err) => {
-                        if (err) this.logger.debug('广播消息发送失败', { error: err.message });
-                    });
-                });
+            if (ws.readyState !== WebSocket.OPEN) {
+                toRemove.push(ws);
+                return;
             }
+
+            // 积压超过 512KB，直接断开连接
+            if (ws.bufferedAmount > 512 * 1024) {
+                this.logger.warn(`WebSocket 积压过高 (${ws.bufferedAmount} 字节)，断开连接`);
+                ws.terminate();
+                toRemove.push(ws);
+                return;
+            }
+
+            // 积压超过 64KB 但未超过 512KB，延迟发送
+            if (ws.bufferedAmount > 64 * 1024) {
+                this.logger.debug(`WebSocket 积压 (${ws.bufferedAmount} 字节)，延迟发送`);
+                setTimeout(() => {
+                    if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount <= 512 * 1024) {
+                        ws.send(message, (err) => {
+                            if (err) this.logger.debug('延迟发送失败', { error: err.message });
+                        });
+                    } else if (ws.readyState === WebSocket.OPEN) {
+                        ws.terminate();
+                        // 注意：这里延迟删除需要去重，简化处理直接忽略可能重复删除
+                    }
+                }, 100);
+                return;
+            }
+
+            // 正常立即发送
+            setImmediate(() => {
+                ws.send(message, (err) => {
+                    if (err) this.logger.debug('广播消息发送失败', { error: err.message });
+                });
+            });
         });
+
+        // 统一移除已断开或待移除的连接
+        toRemove.forEach(ws => this.webClients.delete(ws));
     }
 
     async scanNetwork(startIp, endIp, ports = CONFIG.scanPorts) {
@@ -1512,8 +1547,8 @@ app.get('/api/update/check', asyncHandler(async (req, res) => {
     try {
         // 首先检查数据库中是否有激活的版本
         const activeVersionRows = await executeWithRetry(
-            'SELECT version, download_urlFROM client_versions WHERE is_active = TRUE LIMIT 1'
-        );
+            'SELECT version, download_url FROM client_versions WHERE is_active = TRUE LIMIT 1'
+    );
         
         if (activeVersionRows.length > 0) {
             const activeVersion = activeVersionRows[0];
@@ -1830,83 +1865,53 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
     };
 
     for (const item of sequence) {
+        // 更新修饰键状态
         if (item === '[LSHIFT]' || item === '[RSHIFT]') { shift = true; continue; }
         if (item === '[LCONTROL]' || item === '[RCONTROL]') { ctrl = true; continue; }
         if (item === '[LALT]' || item === '[RALT]') { alt = true; continue; }
         if (item === '[CAPSLOCK]') { caps = !caps; continue; }
-        
-        // 处理退格键
+
+        // 退格键处理
         if (item === '[BACKSPACE]' || item === '[BACK]') {
-            if (result.length > 0) {
-                result.pop();
-            }
-            // 重置修饰键状态
-            shift = false;
-            ctrl = false;
-            alt = false;
+            if (result.length > 0) result.pop();
+            shift = false; ctrl = false; alt = false;
             continue;
         }
-        
-        // 忽略 [TAB] 键，不分割密码
-        if (item === '[TAB]') {
-            // 重置修饰键状态
-            shift = false;
-            ctrl = false;
-            alt = false;
+
+        // Tab 键和 Enter 键：在这里仅重置修饰键，不添加到密码中（因为密码提交由 Enter 触发）
+        if (item === '[TAB]' || item === '[ENTER]' || item === '[RETURN]') {
+            shift = false; ctrl = false; alt = false;
             continue;
         }
-        
+
+        // 其他功能键忽略
         if (item.startsWith('[') && item.endsWith(']')) {
-            // 遇到其他功能键时，重置修饰键状态
-            shift = false;
-            ctrl = false;
-            alt = false;
-            continue;
-        }
-        if (ctrl || alt) {
-            // Ctrl/Alt 组合键不视为密码输入，重置状态
-            shift = false;
-            ctrl = false;
-            alt = false;
+            shift = false; ctrl = false; alt = false;
             continue;
         }
 
-        // 忽略换行符，只处理实际的密码字符
-        if (item === '\n') {
-            continue;
-        }
-
-        let char = item;
+        // 处理普通字符（长度1）
         if (item.length === 1) {
+            let char = item;
             const code = item.charCodeAt(0);
-            const isUpperCase = code >= 65 && code <= 90;
-            const isLowerCase = code >= 97 && code <= 122;
-            const isLetter = isUpperCase || isLowerCase;
-            
-            // 大写字母表示需要按下 shift，小写字母表示不需要
-            if (isUpperCase) {
-                // 对于大写字母，强制使用 shift 状态
-                if (isLetter) {
-                    char = item.toUpperCase();
-                } else if (shiftMap[item]) {
-                    char = shiftMap[item];
-                }
-            } else if (isLowerCase) {
-                // 对于小写字母，不使用 shift 状态
-                if (isLetter) {
-                    char = item.toLowerCase();
-                }
+            const isUpperCaseLetter = code >= 65 && code <= 90;   // A-Z
+            const isLowerCaseLetter = code >= 97 && code <= 122; // a-z
+
+            if (isUpperCaseLetter || isLowerCaseLetter) {
+                // 决定最终大小写：大写条件 = (shift被按下 XNOR caps开启?) 实际上：仅当 shift 与 caps 一个生效时为大写
+                const makeUpper = shift ^ caps;
+                char = makeUpper ? item.toUpperCase() : item.toLowerCase();
             } else {
-                // 对于数字和特殊字符，使用实际的 shift 状态
-                // 不再根据前一个字符是否是大写字母来决定
+                // 数字和符号：shift 影响
                 if (shift && shiftMap[item]) {
                     char = shiftMap[item];
                 }
             }
+
+            result.push(char);
         }
-        result.push(char);
-        
-        // 重置修饰键状态，让修饰键只影响下一个按键
+
+        // 字符输入后重置修饰键（Shift/Alt/Ctrl 通常只影响紧接着的一个按键）
         shift = false;
         ctrl = false;
         alt = false;
