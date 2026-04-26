@@ -1818,6 +1818,46 @@ app.post('/api/batch/command', asyncHandler(async (req, res) => {
     res.json({ success: true, total: clientIds.length, successCount, results });
 }));
 
+app.post('/api/clients/:clientId/logs/info', asyncHandler(async (req, res) => {
+    const clientId = req.params.clientId;
+    const command = { action: 'get_logs_info' };
+    
+    auditLogger.info(`获取客户端日志文件信息: ${clientId}`, { user: req.user });
+    const result = await clientManager.sendCommand(clientId, command);
+    
+    if (!result.success) {
+        return res.status(400).json({ success: false, error: result.error || '发送命令失败' });
+    }
+    
+    res.json({ success: true, message: '命令已发送' });
+}));
+
+app.post('/api/clients/:clientId/logs/delete', asyncHandler(async (req, res) => {
+    const clientId = req.params.clientId;
+    const { file } = req.body;
+    
+    if (!file) {
+        return res.status(400).json({ success: false, error: '文件名不能为空' });
+    }
+    
+    // 验证文件名格式
+    const filenameRegex = /^\d+\.\d+\.\d+\.\d+_\d{8}\.log$/;
+    if (!filenameRegex.test(file)) {
+        return res.status(400).json({ success: false, error: '文件名格式不正确，必须是 IP_YYYYMMDD.log 格式' });
+    }
+    
+    const command = { action: 'delete_log', file };
+    
+    auditLogger.info(`删除客户端日志文件: ${clientId}/${file}`, { user: req.user });
+    const result = await clientManager.sendCommand(clientId, command);
+    
+    if (!result.success) {
+        return res.status(400).json({ success: false, error: result.error || '发送命令失败' });
+    }
+    
+    res.json({ success: true, message: '命令已发送' });
+}));
+
 app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uploadSizeLimit }), asyncHandler(async (req, res) => {
     const ip = req.params.ip;
     let clientId = Array.from(clientManager.clients.keys()).find(id => id.startsWith(ip));

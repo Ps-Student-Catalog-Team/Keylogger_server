@@ -28,9 +28,7 @@ let blacklistPage = 1;
 let blacklistPageSize = 20;
 let blacklistTotalPages = 1;
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
-let autoRefreshTimer = null;
 const MAX_RECONNECT_DELAY = 30000;
-const AUTO_REFRESH_INTERVAL = 2500;
 
 // Alist 配置
 let ALIST_BASE_URL = '';
@@ -97,7 +95,6 @@ document.querySelectorAll('.nav-item').forEach(item => {
         if (page === 'logs') {
             populateClientSelect();
             refreshLogs();
-            startAutoRefresh();
         } else if (page === 'blacklist') {
             blacklistPage = 1;
             loadBlacklist();
@@ -1013,10 +1010,6 @@ function showToast(message, type = 'success') {
 // 日志页面客户端选择变化
 dom.logClientSelect.addEventListener('change', () => {
     refreshLogs();
-    if (autoRefreshTimer) {
-        stopAutoRefresh();
-        startAutoRefresh();
-    }
 });
 
 // 日志搜索过滤
@@ -1038,20 +1031,7 @@ document.getElementById('blacklistSearch')?.addEventListener('input', (e) => {
     });
 });
 
-//自动刷新
-function startAutoRefresh() {
-    if (autoRefreshTimer) return;
-    autoRefreshTimer = setInterval(() => {
-        refreshLogs();
-    }, AUTO_REFRESH_INTERVAL);
-}
 
-function stopAutoRefresh() {
-    if (autoRefreshTimer) {
-        clearInterval(autoRefreshTimer);
-        autoRefreshTimer = null;
-    }
-}
 
 // 提取密码
 // 文件: app.js
