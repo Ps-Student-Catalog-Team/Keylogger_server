@@ -251,6 +251,16 @@ const asyncHandler = fn => (req, res, next) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
+// ========== 登录速率限制器 ==========
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,      // 15分钟窗口
+    max: 10,                        // 最多尝试次数
+    skipSuccessfulRequests: true,   // 成功后不计入
+    message: { error: '登录尝试过于频繁，请15分钟后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
 // ========== 认证中间件 ==========
 function authMiddleware(req, res, next) {
     // 允许静态资源和登录页
@@ -318,15 +328,6 @@ app.get('/logout', (req, res) => {
         secure
     });
     res.redirect('/login');
-});
-
-const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,      // 15分钟窗口
-    max: 10,                        // 最多尝试次数
-    skipSuccessfulRequests: true,   // 成功后不计入
-    message: { error: '登录尝试过于频繁，请15分钟后再试' },
-    standardHeaders: true,
-    legacyHeaders: false,
 });
 
 app.use(authMiddleware);
