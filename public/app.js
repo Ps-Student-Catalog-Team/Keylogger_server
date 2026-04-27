@@ -1184,70 +1184,59 @@ function parseExtractedPasswords(content) {
 function renderLogPage() {
     const logContentEl = document.getElementById('logContent');
     const pagerEl = document.getElementById('logPager');
-    
     if (!currentLogContent) return;
-    
-    const lines = currentLogContent.split('\n');
-    const totalLines = lines.length;
-    const maxPage = Math.ceil(totalLines / LOG_PAGE_SIZE) || 1;
-    
-    if (currentLogPage > maxPage) currentLogPage = maxPage;
-    if (currentLogPage < 1) currentLogPage = 1;
-    
-    const start = (currentLogPage - 1) * LOG_PAGE_SIZE;
-    const end = Math.min(start + LOG_PAGE_SIZE, totalLines);
-    const pageLines = lines.slice(start, end);
-    
-    // 先转义整行，防止 XSS
-    let processedLines = pageLines.map(line => escapeHtml(line));
-    
-    // 再高亮（搜索词也需要转义）
+
+    // 1. 先进行全文高亮（在完整内容上匹配）
+    let highlightedFull = escapeHtml(currentLogContent);
     if (currentLogHighlightRaw) {
-        const escapedRaw = escapeHtml(currentLogHighlightRaw);
-        processedLines = processedLines.map(line => 
-            line.replace(new RegExp(escapeRegexSpecialChars(escapedRaw), 'g'), 
-                         `<span class="raw-password-highlight">${escapedRaw}</span>`)
+        const escapedRaw = escapeHtml(currentLogHighlightRaw.replace(/\n/g, '↵'));
+        highlightedFull = highlightedFull.replace(
+            new RegExp(escapeRegexSpecialChars(escapedRaw), 'gi'),
+            '<span class="raw-password-highlight">$&</span>'
         );
     }
     if (currentLogHighlightPassword && currentLogHighlightPassword !== currentLogHighlightRaw) {
         const escapedPwd = escapeHtml(currentLogHighlightPassword);
-        processedLines = processedLines.map(line => 
-            line.replace(new RegExp(escapeRegexSpecialChars(escapedPwd), 'g'), 
-                         `<span class="password-highlight">${escapedPwd}</span>`)
+        highlightedFull = highlightedFull.replace(
+            new RegExp(escapeRegexSpecialChars(escapedPwd), 'gi'),
+            '<span class="password-highlight">$&</span>'
         );
     }
-    
-    logContentEl.innerHTML = processedLines.join('\n');
-    
-    // 更新分页控件
+
+    // 2. 按换行分页
+    const lines = highlightedFull.split('\n');
+    const totalLines = lines.length;
+    const maxPage = Math.ceil(totalLines / LOG_PAGE_SIZE) || 1;
+    if (currentLogPage > maxPage) currentLogPage = maxPage;
+    if (currentLogPage < 1) currentLogPage = 1;
+
+    const start = (currentLogPage - 1) * LOG_PAGE_SIZE;
+    const end = Math.min(start + LOG_PAGE_SIZE, totalLines);
+    const pageLines = lines.slice(start, end);
+    logContentEl.innerHTML = pageLines.join('\n');
+
+    // 3. 更新分页器（保持不变）
     if (pagerEl) {
-        if (maxPage <= 1) {
-            pagerEl.innerHTML = '';
-        } else {
-            pagerEl.innerHTML = `
-                <button class="btn btn-sm btn-secondary" ${currentLogPage === 1 ? 'disabled' : ''}
-                        onclick="changeLogPage(-1)">
-                    <i class="fas fa-chevron-left"></i> 上一页
-                </button>
-                <span style="margin: 0 1rem; color: var(--gray);">
-                    第 ${currentLogPage} 页 / ${maxPage} 页 (共 ${totalLines} 行)
-                </span>
-                <button class="btn btn-sm btn-secondary" ${currentLogPage === maxPage ? 'disabled' : ''}
-                        onclick="changeLogPage(1)">
-                    下一页 <i class="fas fa-chevron-right"></i>
-                </button>
-            `;
-        }
+        if (maxPage <= 1) pagerEl.innerHTML = '';
+        else pagerEl.innerHTML = `
+            <button class="btn btn-sm btn-secondary" ${currentLogPage===1?'disabled':''} onclick="changeLogPage(-1)"><i class="fas fa-chevron-left"></i> 上一页</button>
+            <span style="margin:0 1rem;color:var(--gray);">第 ${currentLogPage} 页 / ${maxPage} 页 (共 ${totalLines} 行)</span>
+            <button class="btn btn-sm btn-secondary" ${currentLogPage===maxPage?'disabled':''} onclick="changeLogPage(1)">下一页 <i class="fas fa-chevron-right"></i></button>
+        `;
     }
+
+    // 4. 滚动到高亮位置（如果当前页有高亮）
     if (currentLogScrollTarget) {
         setTimeout(() => {
             const highlight = document.querySelector('.raw-password-highlight') 
                            || document.querySelector('.password-highlight');
             if (highlight) {
                 highlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                // 闪烁效果
                 highlight.classList.add('blink');
                 setTimeout(() => highlight.classList.remove('blink'), 2000);
+            } else {
+                // 如果当前页没有高亮（例如密码在未加载的页），滚动到页顶
+                logContentEl.scrollTop = 0;
             }
         }, 100);
     }
@@ -1395,7 +1384,7 @@ function renderExtractedPage() {
             <div class="extract-item">
                 <div class="index">${item.index}</div>
                 <div class="password-content">
-                    ${escapeHtml(item.password)}
+                    ${escapeHtml(item.password || '')}
                     ${item.rawPassword ? `
                         <div class="raw-password" style="font-size: 0.8rem; color: var(--gray); margin-top: 0.5rem;">
                             <span style="font-weight: 600;">原始数据:</span> ${escapeHtml(item.rawPassword)}
@@ -1406,7 +1395,7 @@ function renderExtractedPage() {
                     <a href="javascript:void(0)" class="source-file-link"
                        data-client-id="${escapeHtml(clientId)}"
                        data-filename="${escapeHtml(filename)}"
-                       data-password="${escapeHtml(item.password)}"
+                       data-password="${escapeHtml(item.password || '')} "
                        data-raw-password="${escapeHtml(item.rawPassword || '')}"
                        style="color: var(--primary); text-decoration: underline; cursor: pointer;">
                         ${escapeHtml(item.file)}
