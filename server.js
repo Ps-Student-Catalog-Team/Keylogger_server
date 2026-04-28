@@ -2114,6 +2114,11 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
         }
     }
 
+    if (!needFullReextraction && extractionCache.passwords.length === 0 && currentFileStates.size > 0) {
+        needFullReextraction = true;
+        logger.debug('提取缓存为空，强制重新处理所有日志文件');
+    }
+
     if (!needFullReextraction && extractionCache.passwords.length > 0) {
         logger.debug('缓存完全有效，直接返回密码提取结果');
         return res.json({ success: true, count: extractionCache.passwords.length });
@@ -2124,13 +2129,13 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
     for (const file of logFiles) {
         const mtime = currentFileStates.get(file.filename).mtime;
         const cachedMtime = extractionCache.fileMTimes.get(file.filename);
-        if (!cachedMtime || cachedMtime !== mtime) {
+        if (!cachedMtime || cachedMtime !== mtime || extractionCache.passwords.length === 0) {
             filesToProcess.push(file);
             changedFileNames.add(file.filename);
         }
     }
 
-    logger.debug(`密码提取：共 ${logFiles.length} 个日志文件，其中 ${filesToProcess.length} 个需要处理`);
+    logger.info(`密码提取：共 ${logFiles.length} 个日志文件，其中 ${filesToProcess.length} 个需要处理`);
 
     // 加载黑名单缓存
     await loadBlacklistCache();

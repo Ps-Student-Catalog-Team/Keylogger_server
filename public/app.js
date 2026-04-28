@@ -1211,8 +1211,10 @@ function renderLogPage() {
     // 处理原始密码高亮（优先）
     let rawHighlighted = false;
     if (currentLogHighlightRaw) {
+        const rawSearchText = currentLogHighlightRaw.replace(/↵/g, '\n');
+        const rawRegex = new RegExp(escapeRegexSpecialChars(rawSearchText), 'gi');
         const replaced = content.replace(
-            new RegExp(escapeRegexSpecialChars(currentLogHighlightRaw), 'gi'),
+            rawRegex,
             (match) => {
                 rawHighlighted = true;
                 return `${rawStart}${match}${rawEnd}`;
