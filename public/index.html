@@ -1292,6 +1292,48 @@
                     <div id="versionsTable"></div>
                 </div>
                 <div class="card">
+                    <h3>日志维护</h3>
+                    <p style="color: var(--gray); margin-bottom: 1rem; font-size: 0.9rem;">
+                        扫描并选择性清理 Alist 中超过 <span id="retentionDaysSpan">30</span> 天的日志文件。
+                        清理前会自动保存包含“Windows安全中心”的行到本地。
+                    </p>
+                    <div style="display: flex; gap: 1rem;">
+                        <button class="btn btn-primary" onclick="scanExpiredLogs()">
+                            <i class="fas fa-search"></i> 扫描过期日志
+                        </button>
+                        <button class="btn btn-warning" id="cleanAllExpiredBtn" style="display: none;" onclick="cleanAllExpired()">
+                            <i class="fas fa-broom"></i> 一键清理全部
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 过期日志预览模态框 -->
+                <div class="modal" id="expiredLogsModal">
+                    <div class="modal-content" style="max-width: 700px;">
+                        <div class="modal-header">
+                            <h3>即将清理的过期日志</h3>
+                            <button class="close-btn" onclick="hideModal('expiredLogsModal')">&times;</button>
+                        </div>
+                        <div style="margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center;">
+                            <span style="color: var(--gray);">共 <span id="expiredCount">0</span> 个文件</span>
+                            <div>
+                                <label style="cursor: pointer;">
+                                    <input type="checkbox" id="selectAllExpired" checked onchange="toggleSelectAllExpired()"> 全选
+                                </label>
+                            </div>
+                        </div>
+                        <div class="file-list-container" id="expiredFileList" style="max-height: 300px; overflow-y: auto; border: 1px solid var(--gray-light); border-radius: 6px;">
+                            <!-- 动态生成文件列表 -->
+                        </div>
+                        <div style="margin-top: 1rem; display: flex; justify-content: flex-end; gap: 0.75rem;">
+                            <button class="btn btn-secondary" onclick="hideModal('expiredLogsModal')">取消</button>
+                            <button class="btn btn-danger" onclick="deleteSelectedExpired()">
+                                <i class="fas fa-trash"></i> 删除选中
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
                     <h3>系统信息</h3>
                     <div class="form-group">
                         <label>心跳检测间隔 (毫秒)</label>

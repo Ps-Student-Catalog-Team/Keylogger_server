@@ -34,6 +34,9 @@ const MAX_RECONNECT_DELAY = 30000;
 let ALIST_BASE_URL = '';
 let ALIST_BASE_PATH = '';
 
+// 全局变量：当前扫描出的过期文件列表
+let currentExpiredFiles = [];
+
 // DOM 元素
 const dom = {
     wsStatus: document.getElementById('wsStatus'),
@@ -45,6 +48,10 @@ const dom = {
     toast: document.getElementById('toast')
 };
 
+function stopAutoRefresh() {
+
+}
+
 function normalizePassword(value) {
     if (!value) return '';
     let normalized = String(value).trim();
@@ -55,14 +62,7 @@ function normalizePassword(value) {
     return normalized;
 }
 
-/**
- * 模糊匹配函数：支持不连续匹配
- * 例如: fuzzyMatch('密码', '这是一个密码') 返回 true
- * 例如: fuzzyMatch('ab', 'aXbXc') 返回 true
- * @param {string} keyword - 搜索关键词
- * @param {string} text - 被搜索的文本
- * @returns {boolean} 是否匹配
- */
+// 模糊匹配函数：支持不连续匹配
 function fuzzyMatch(keyword, text) {
     if (!keyword) return true;
     keyword = keyword.toLowerCase();
@@ -1878,4 +1878,166 @@ async function setActiveVersion(version) {
             }
         }
     );
+}
+
+//手动触发清理过期日志
+async function triggerCleanExpiredLogs() {
+    showConfirmModal(
+        '清理过期日志',
+        '确定要清理 Alist 中超过保留天数的日志文件吗？\n' +
+        '清理前会自动保存包含“Windows安全中心”的敏感信息到本地文件。',
+        async () => {
+            try {
+                showToast('正在清理过期日志...', 'success');
+                const response = await fetch('/api/maintenance/clean-expired-logs', {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                if (response.ok && result.success) {
+                    showToast('清理完成', 'success');
+                } else {
+                    showToast('清理失败: ' + (result.error || '未知错误'), 'error');
+                }
+            } catch (e) {
+                console.error('清理过期日志失败:', e);
+                showToast('请求失败', 'error');
+            }
+        }
+    );
+}
+
+// 扫描过期日志
+async function scanExpiredLogs() {
+    showToast('正在扫描过期日志...');
+    try {
+        const response = await fetch('/api/maintenance/scan-expired-logs');
+        const data = await response.json();
+        if (!data.success) throw new Error(data.error || '扫描失败');
+        
+        currentExpiredFiles = data.files || [];
+        renderExpiredFiles(currentExpiredFiles);
+        document.getElementById('expiredLogsModal').classList.add('show');
+        
+        if (currentExpiredFiles.length === 0) {
+            document.getElementById('expiredFileList').innerHTML = 
+                '<div class="empty-state"><p>👌 没有需要清理的过期日志</p></div>';
+        }
+
+        showToast(`发现 ${currentExpiredFiles.length} 个过期文件`);
+    } catch (e) {
+        console.error(e);
+        showToast('扫描失败: ' + e.message, 'error');
+    }
+}
+
+// 渲染过期文件列表
+function renderExpiredFiles(files) {
+    const container = document.getElementById('expiredFileList');
+    const countSpan = document.getElementById('expiredCount');
+    countSpan.textContent = files.length;
+
+    if (files.length === 0) return;
+
+    let html = '';
+    files.forEach(file => {
+        html += `
+            <div class="file-item" style="display: flex; align-items: center; padding: 0.5rem 1rem; border-bottom: 1px solid var(--gray-light);">
+                <input type="checkbox" class="expired-checkbox" value="${escapeHtml(file.filename)}" checked 
+                       onchange="updateSelectAllState()">
+                <span style="margin-left: 0.75rem; flex: 1;">${escapeHtml(file.filename)}</span>
+                <span style="color: var(--gray); font-size: 0.85rem;">${file.date}</span>
+            </div>
+        `;
+    });
+    container.innerHTML = html;
+
+    // 默认全选状态
+    document.getElementById('selectAllExpired').checked = true;
+}
+
+// 全选/取消全选
+function toggleSelectAllExpired() {
+    const selectAll = document.getElementById('selectAllExpired').checked;
+    const checkboxes = document.querySelectorAll('.expired-checkbox');
+    checkboxes.forEach(cb => { cb.checked = selectAll; });
+}
+
+// 更新全选状态（当某个复选框手动切换时）
+function updateSelectAllState() {
+    const checkboxes = document.querySelectorAll('.expired-checkbox');
+    const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+    document.getElementById('selectAllExpired').checked = allChecked;
+}
+
+// 删除选中的过期日志
+async function deleteSelectedExpired() {
+    const checkboxes = document.querySelectorAll('.expired-checkbox');
+    const selected = Array.from(checkboxes)
+        .filter(cb => cb.checked)
+        .map(cb => cb.value);
+
+    if (selected.length === 0) {
+        showToast('请至少选择一个文件', 'error');
+        return;
+    }
+
+    showConfirmModal(
+        '确认删除',
+        `将删除选中的 ${selected.length} 个日志文件，删除前会自动保存敏感信息。\n此操作不可恢复！`,
+        async () => {
+            hideModal('expiredLogsModal');
+            showToast('正在清理选中的日志...');
+            try {
+                const response = await fetch('/api/maintenance/clean-selected-logs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filenames: selected })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showToast(`成功删除 ${data.totalClean} 个文件，保存 ${data.totalSaved} 条敏感信息`, 'success');
+                    // 清理成功后，可以再次扫描，或者直接从列表中移除已删除的文件
+                    // 这里选择重新扫描以刷新状态
+                    // scanExpiredLogs(); // 可选
+                } else {
+                    showToast('清理失败: ' + (data.error || '未知错误'), 'error');
+                }
+            } catch (e) {
+                console.error(e);
+                showToast('请求失败: ' + e.message, 'error');
+            }
+        }
+    );
+}
+
+// 一键清理全部
+async function cleanAllExpired() {
+    // 直接复用原有的全清接口
+    showConfirmModal(
+        '一键清理全部过期日志',
+        '确定要删除所有超过保留天数的日志吗？删除前会自动保存敏感信息。',
+        async () => {
+            showToast('正在清理所有过期日志...');
+            try {
+                const response = await fetch('/api/maintenance/clean-expired-logs', { method: 'POST' });
+                const data = await response.json();
+                if (data.success) {
+                    showToast('已清理所有过期日志', 'success');
+                } else {
+                    showToast('清理失败: ' + (data.error || '未知错误'), 'error');
+                }
+            } catch (e) {
+                console.error(e);
+                showToast('请求失败', 'error');
+            }
+        }
+    );
+}
+
+// 页面加载时设置保留天数显示
+function showRetentionDays() {
+    const span = document.getElementById('retentionDaysSpan');
+    if (span) {
+        span.textContent = '30'; // 默认值，可以替换为真实获取
+    }
 }
