@@ -1920,7 +1920,7 @@ async function scanExpiredLogs() {
         
         if (currentExpiredFiles.length === 0) {
             document.getElementById('expiredFileList').innerHTML = 
-                '<div class="empty-state"><p>👌 没有需要清理的过期日志</p></div>';
+                '<div class="empty-state"><p>没有需要清理的过期日志</p></div>';
         }
 
         showToast(`发现 ${currentExpiredFiles.length} 个过期文件`);
