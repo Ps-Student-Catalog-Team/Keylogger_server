@@ -337,6 +337,10 @@ function handleWebSocketMessage(data) {
                 showToast('删除失败: ' + data.error, 'error');
             }
             break;
+        
+            case 'client_deleted':
+                removeClientFromList(data.clientId);
+            break;
 
         case 'error':
             showToast('服务器错误: ' + data.message, 'error');

