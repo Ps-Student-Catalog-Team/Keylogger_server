@@ -333,16 +333,6 @@ app.get('/logout', (req, res) => {
     res.redirect('/login');
 });
 
-app.post('/api/client/report', asyncHandler(async (req, res) => {
-    const { version, ip, local_port } = req.body;
-    if (!version || !ip || !local_port) {
-        return res.status(400).json({ code: 400, error: '缺少必要参数: version, ip, local_port' });
-    }
-    logger.info(`收到客户端版本报告: ${ip}:${local_port}, 版本: ${version}`);
-    clientManager.updateClientVersion(ip, local_port, version);
-    res.json({ code: 200, message: '报告已接收' });
-}));
-
 app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uploadSizeLimit }), asyncHandler(async (req, res) => {
     const ip = req.params.ip;
     let clientId = Array.from(clientManager.clients.keys()).find(id => id.startsWith(ip));
@@ -1007,6 +997,9 @@ class ClientManager {
         }
         if (response.data.upload_enabled !== undefined) {
             client.uploadEnabled = response.data.upload_enabled;
+        }
+        if (response.data.version !== undefined) {
+            client.version = response.data.version;
         }
     }
 

@@ -267,6 +267,9 @@ function handleWebSocketMessage(data) {
                     if (data.response.data.upload_enabled !== undefined) {
                         client.uploadEnabled = data.response.data.upload_enabled;
                     }
+                    if (data.response.data.version !== undefined) {
+                        client.version = data.response.data.version;
+                    }
                     renderClientsTable();
                 }
             }
