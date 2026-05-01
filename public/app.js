@@ -373,7 +373,7 @@ function removeClientFromList(clientId) {
 // 渲染客户端表格
 function renderClientsTable() {
     if (clients.length === 0) {
-        dom.clientsTable.innerHTML = '<tr><td colspan="7" class="empty-state">暂无客户端</td></tr>';
+        dom.clientsTable.innerHTML = '<tr><td colspan="8" class="empty-state">暂无客户端</td></tr>';
         return;
     }
 
@@ -390,6 +390,7 @@ function renderClientsTable() {
         const safeIp = escapeHtml(client.ip);
         const safePort = escapeHtml(client.port);
         const safeStatus = escapeHtml(client.status);
+        const version = client.version || '未知';
         const isConnecting = connectingClients.has(client.id);
 
         let actionButtons = `
@@ -416,6 +417,7 @@ function renderClientsTable() {
         html += `<tr>
             <td>${safeIp}</td>
             <td>${safePort}</td>
+            <td><span class="status-badge" style="background:rgba(59,130,246,0.1);color:var(--primary);">${escapeHtml(version)}</span></td>
             <td><span class="status-badge ${statusClass}">${safeStatus}</span></td>
             <td><span class="status-badge ${recordClass}">${client.recording ? '录制中' : '已暂停'}</span></td>
             <td><span class="status-badge ${uploadClass}">${client.uploadEnabled ? '已启用' : '未启用'}</span></td>
@@ -455,6 +457,7 @@ function showClientModal(clientId) {
         <p><strong>ID:</strong> ${escapeHtml(client.id)}</p>
         <p><strong>IP:</strong> ${escapeHtml(client.ip)}</p>
         <p><strong>端口:</strong> ${escapeHtml(client.port)}</p>
+        <p><strong>版本:</strong> ${escapeHtml(client.version || '未知')}</p>
         <p><strong>状态:</strong> ${escapeHtml(client.status)}</p>
         <p><strong>录制状态:</strong> ${client.recording ? '录制中' : '已暂停'}</p>
         <p><strong>上传状态:</strong> ${client.uploadEnabled ? '已启用' : '未启用'}</p>
