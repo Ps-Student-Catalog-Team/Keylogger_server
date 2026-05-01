@@ -1583,7 +1583,7 @@ class ClientManager {
         return new Promise((resolve, reject) => {
             const options = {
                 hostname: 'localhost',
-                port: CONFIG.port || 3000,
+                port: CONFIG.httpPort || 3233,
                 path: '/api/update/check',
                 method: 'GET'
             };
