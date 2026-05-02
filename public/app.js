@@ -332,9 +332,11 @@ function handleWebSocketMessage(data) {
 
         case 'delete_result':
             if (data.success) {
+                // 从客户端列表中移除该客户端，并自动刷新表格
+                removeClientFromList(data.clientId);
                 showToast('客户端已删除', 'success');
             } else {
-                showToast('删除失败: ' + data.error, 'error');
+                showToast('删除失败: ' + (data.error || '未知错误'), 'error');
             }
             break;
 

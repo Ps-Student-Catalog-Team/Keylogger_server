@@ -1705,10 +1705,16 @@ function handleWebSocketConnection(ws, req) {
                     }
                     ws.send(JSON.stringify({ type: 'disconnected', clientId: data.clientId }));
                     break;
-
+                
                 case 'delete_client':
                     try {
                         await clientManager.deleteKnownClient(data.clientId);
+                        clientManager.broadcastToWeb({
+                            type: 'client_updated',
+                            event: 'deleted',
+                            client: { id: data.clientId }
+                        });
+
                         ws.send(JSON.stringify({
                             type: 'delete_result',
                             success: true,
