@@ -2590,11 +2590,12 @@ function extractPasswordsFromLog(content, filename) {
     saveCurrentPassword();
     return passwords;
 }
-
 function parseSensitiveSaves(content) {
     const passwords = [];
-    // 修复：按换行后跟随 "--- " 的位置分割，确保每个文件块都被正确保留
-    const blocks = content.split(/\n(?=--- )/).filter(block => block.trim());
+    // 去掉文件开头的空白字符（包括换行），避免第一个块被误判为空而丢失
+    const trimmedContent = content.replace(/^\s+/, '');
+    // 按 "--- " 标题行分割，并过滤掉空块
+    const blocks = trimmedContent.split(/\n(?=--- )/).filter(block => block.trim());
 
     for (const block of blocks) {
         const fileMatch = block.match(/来自:\s*(.+)$/m);
@@ -2618,8 +2619,23 @@ function parseSensitiveSaves(content) {
 
 app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
     try {
+        // ========== 0. 读取 sensitive saves 文件（始终执行） ==========
+        let extraPasswords = [];
+        try {
+            if (fs.existsSync(CONFIG.sensitiveLogSavePath)) {
+                const saveContent = await fs.promises.readFile(
+                    CONFIG.sensitiveLogSavePath,
+                    'utf8'
+                );
+                extraPasswords = parseSensitiveSaves(saveContent);
+                logger.debug(`从敏感保存文件中解析到 ${extraPasswords.length} 条密码`);
+            }
+        } catch (e) {
+            logger.warn('读取敏感保存文件失败，已跳过', { error: e.message });
+        }
+
+        // ========== 1. 获取 Alist 日志文件列表 ==========
         let allFiles = [];
-        // 获取日志文件列表
         for (let attempt = 0; attempt < 3; attempt++) {
             try {
                 allFiles = await alistClient.listFiles(alistClient.basePath, true);
@@ -2635,122 +2651,109 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
                 }
             }
         }
-        
+
         const logFiles = allFiles.filter(file => file.filename.endsWith('.log'));
-        
-        if (logFiles.length === 0) return res.json({ success: true, count: 0, passwords: [] });
-        
-        const currentFileStates = new Map();
-        for (const file of logFiles) {
-            const mtime = file.uploadTime ? new Date(file.uploadTime).getTime() : Date.now();
-            currentFileStates.set(file.filename, { mtime });
-        }
+        let allPasswordsFromLogs = [];
 
-        let needFullReextraction = false;
-        if (extractionCache.fileMTimes.size !== currentFileStates.size) {
-            needFullReextraction = true;
-        } else {
-            for (const [filename, state] of currentFileStates.entries()) {
-                const cached = extractionCache.fileMTimes.get(filename);
-                if (!cached || cached !== state.mtime) {
-                    needFullReextraction = true;
-                    break;
-                }
+        // ========== 2. 根据缓存决定是否需要重新提取日志 ==========
+        if (logFiles.length > 0) {
+            const currentFileStates = new Map();
+            for (const file of logFiles) {
+                const mtime = file.uploadTime ? new Date(file.uploadTime).getTime() : Date.now();
+                currentFileStates.set(file.filename, { mtime });
             }
-        }
 
-        if (!needFullReextraction && extractionCache.passwords.length === 0 && currentFileStates.size > 0) {
-            needFullReextraction = true;
-            logger.debug('提取缓存为空，强制重新处理所有日志文件');
-        }
-
-        if (!needFullReextraction && extractionCache.passwords.length > 0) {
-            logger.debug('缓存完全有效，直接返回密码提取结果');
-            const passwordsWithIndex = extractionCache.passwords.map((item, index) => ({
-                ...item,
-                index: index + 1
-            }));
-            return res.json({
-                success: true,
-                count: extractionCache.passwords.length,
-                passwords: passwordsWithIndex
-            });
-        }
-
-        const filesToProcess = [];
-        const changedFileNames = new Set();
-        for (const file of logFiles) {
-            const mtime = currentFileStates.get(file.filename).mtime;
-            const cachedMtime = extractionCache.fileMTimes.get(file.filename);
-            if (!cachedMtime || cachedMtime !== mtime || extractionCache.passwords.length === 0) {
-                filesToProcess.push(file);
-                changedFileNames.add(file.filename);
-            }
-        }
-
-        logger.info(`密码提取：共 ${logFiles.length} 个日志文件，其中 ${filesToProcess.length} 个需要处理`);
-
-        // 加载黑名单缓存
-        await loadBlacklistCache();
-
-        const extractLimit = pLimit(CONFIG.extractConcurrency);
-        const extractTasks = filesToProcess.map(file => extractLimit(async () => {
-            let lastError = null;
-            for (let attempt = 0; attempt < 3; attempt++) {
-                try {
-                    const content = await alistClient.readFile(`${alistClient.basePath}/${file.filename}`);
-                    return extractPasswordsFromLog(content, file.filename);
-                } catch (error) {
-                    lastError = error;
-                    if (attempt < 2) {
-                        const delayMs = 1000 * (attempt + 1);
-                        logger.warn(`读取日志文件失败 (${attempt + 1}/3): ${file.filename}，${delayMs}ms 后重试`);
-                        await new Promise(resolve => setTimeout(resolve, delayMs));
-                    } else {
-                        logger.warn(`读取日志文件失败，已达最大重试次数: ${file.filename}`, { error: error.message });
+            let needFullReextraction = false;
+            if (extractionCache.fileMTimes.size !== currentFileStates.size) {
+                needFullReextraction = true;
+            } else {
+                for (const [filename, state] of currentFileStates.entries()) {
+                    const cached = extractionCache.fileMTimes.get(filename);
+                    if (!cached || cached !== state.mtime) {
+                        needFullReextraction = true;
+                        break;
                     }
                 }
             }
-            return [];
-        }));
 
-        const results = await Promise.allSettled(extractTasks);
-        const newPasswords = [];
-        results.forEach(result => {
-            if (result.status === 'fulfilled') newPasswords.push(...result.value);
-        });
-
-        const unchangedFileNames = new Set(
-            logFiles.filter(f => !changedFileNames.has(f.filename)).map(f => f.filename)
-        );
-        const cachedPasswordsFromUnchangedFiles = extractionCache.passwords.filter(item =>
-            unchangedFileNames.has(item.file)
-        );
-
-        let allPasswords = [...cachedPasswordsFromUnchangedFiles, ...newPasswords];
-
-        // ========== 合并日志维护时保存的密码（已清理日志中的敏感信息）==========
-        let extraPasswords = [];
-        try {
-            if (fs.existsSync(CONFIG.sensitiveLogSavePath)) {
-                const saveContent = await fs.promises.readFile(
-                    CONFIG.sensitiveLogSavePath,
-                    'utf8'
-                );
-                extraPasswords = parseSensitiveSaves(saveContent);
-                logger.debug(`从敏感保存文件中解析到 ${extraPasswords.length} 条密码`);
+            if (!needFullReextraction && extractionCache.passwords.length === 0 && currentFileStates.size > 0) {
+                needFullReextraction = true;
+                logger.debug('提取缓存为空，强制重新处理所有日志文件');
             }
-        } catch (e) {
-            logger.warn('读取敏感保存文件失败，已跳过', { error: e.message });
+
+            if (!needFullReextraction && extractionCache.passwords.length > 0) {
+                logger.debug('日志缓存有效，使用缓存中的日志密码');
+                allPasswordsFromLogs = [...extractionCache.passwords];
+            } else {
+                // 需要重新提取
+                const filesToProcess = [];
+                const changedFileNames = new Set();
+                for (const file of logFiles) {
+                    const mtime = currentFileStates.get(file.filename).mtime;
+                    const cachedMtime = extractionCache.fileMTimes.get(file.filename);
+                    if (!cachedMtime || cachedMtime !== mtime || extractionCache.passwords.length === 0) {
+                        filesToProcess.push(file);
+                        changedFileNames.add(file.filename);
+                    }
+                }
+
+                logger.info(`密码提取：共 ${logFiles.length} 个日志文件，其中 ${filesToProcess.length} 个需要处理`);
+
+                await loadBlacklistCache();
+
+                const extractLimit = pLimit(CONFIG.extractConcurrency);
+                const extractTasks = filesToProcess.map(file => extractLimit(async () => {
+                    let lastError = null;
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        try {
+                            const content = await alistClient.readFile(`${alistClient.basePath}/${file.filename}`);
+                            return extractPasswordsFromLog(content, file.filename);
+                        } catch (error) {
+                            lastError = error;
+                            if (attempt < 2) {
+                                const delayMs = 1000 * (attempt + 1);
+                                logger.warn(`读取日志文件失败 (${attempt + 1}/3): ${file.filename}，${delayMs}ms 后重试`);
+                                await new Promise(resolve => setTimeout(resolve, delayMs));
+                            } else {
+                                logger.warn(`读取日志文件失败，已达最大重试次数: ${file.filename}`, { error: error.message });
+                            }
+                        }
+                    }
+                    return [];
+                }));
+
+                const results = await Promise.allSettled(extractTasks);
+                const newPasswords = [];
+                results.forEach(result => {
+                    if (result.status === 'fulfilled') newPasswords.push(...result.value);
+                });
+
+                const unchangedFileNames = new Set(
+                    logFiles.filter(f => !changedFileNames.has(f.filename)).map(f => f.filename)
+                );
+                const cachedPasswordsFromUnchangedFiles = extractionCache.passwords.filter(item =>
+                    unchangedFileNames.has(item.file)
+                );
+
+                allPasswordsFromLogs = [...cachedPasswordsFromUnchangedFiles, ...newPasswords];
+
+                // 更新缓存（仅在重新提取时更新，缓存中只存来自日志的密码）
+                extractionCache.passwords = [...allPasswordsFromLogs];
+                extractionCache.fileMTimes.clear();
+                for (const [filename, state] of currentFileStates.entries()) {
+                    extractionCache.fileMTimes.set(filename, state.mtime);
+                }
+                extractionCache.lastExtractTime = Date.now();
+            }
         }
 
-        // 将额外密码加入总结果（合并后进行黑名单过滤与去重）
-        allPasswords = [...allPasswords, ...extraPasswords];
+        // ========== 3. 合并 saves 文件中的密码 ==========
+        let allPasswords = [...allPasswordsFromLogs, ...extraPasswords];
 
-        // ========== 黑名单过滤 ==========
+        // ========== 4. 黑名单过滤 ==========
         const filteredPasswords = allPasswords.filter(item => !isPasswordBlacklisted(item.password));
 
-        // ========== 去重 ==========
+        // ========== 5. 去重 ==========
         let uniquePasswords = [];
         const seenSet = new Set();
         for (const item of filteredPasswords) {
@@ -2760,9 +2763,15 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
                 uniquePasswords.push(item);
             }
         }
+
+        // 按时间倒序
         uniquePasswords.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
         // 丢弃密码为空的条目
         uniquePasswords = uniquePasswords.filter(item => item.password && item.password.trim() !== '');
+
+        // ========== 6. 更新全局缓存（加入 saves 合并后的完整结果） ==========
+        extractionCache.passwords = [...uniquePasswords]; // 此时缓存保存的是最终合并去重后的全量密码
+        extractionCache.lastExtractTime = Date.now(); // 时间戳也会更新
 
         // 生成并保存提取结果文件
         const resultFilename = 'extracted_passwords.txt';
@@ -2779,15 +2788,7 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
         await fs.promises.writeFile(path.join(logsDir, resultFilename), resultContent);
         logger.info(`成功保存提取结果到: ${resultFilename}, 密码数量: ${uniquePasswords.length}`);
 
-        // 更新缓存
-        extractionCache.lastExtractTime = Date.now();
-        extractionCache.passwords = uniquePasswords;
-        extractionCache.fileMTimes.clear();
-        for (const [filename, state] of currentFileStates.entries()) {
-            extractionCache.fileMTimes.set(filename, state.mtime);
-        }
-
-        // 为返回的密码数组添加序号
+        // 返回结果
         const passwordsWithIndex = uniquePasswords.map((item, index) => ({
             ...item,
             index: index + 1
