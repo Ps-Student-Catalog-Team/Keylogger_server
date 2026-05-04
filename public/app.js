@@ -4,6 +4,7 @@ let clients = [];
 let currentClientId = null;
 let reconnectTimer = null;
 let reconnectDelay = 1000;
+let autoRefreshTimer = null;
 let toastTimer = null;
 let isUnloading = false;
 let isReconnecting = false;
@@ -40,6 +41,8 @@ let blacklistPageSize = 20;
 let blacklistTotalPages = 1;
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
 const MAX_RECONNECT_DELAY = 30000;
+const MAX_RECONNECT_ATTEMPTS = 6;
+const AUTO_REFRESH_INTERVAL = 15000;
 
 // Alist 配置
 let ALIST_BASE_URL = '';
@@ -110,7 +113,17 @@ if (dom.consoleInput) {
 }
 
 function stopAutoRefresh() {
+    if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+    }
+}
 
+function startAutoRefreshLogs() {
+    stopAutoRefresh();
+    autoRefreshTimer = setInterval(() => {
+        refreshLogs();
+    }, AUTO_REFRESH_INTERVAL);
 }
 
 function normalizePassword(value) {
@@ -177,6 +190,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
         if (page === 'logs') {
             populateClientSelect();
             refreshLogs();
+            startAutoRefreshLogs();
         } else if (page === 'blacklist') {
             blacklistPage = 1;
             loadBlacklist();
@@ -272,6 +286,12 @@ function connectWebSocket() {
         if (reconnectTimer) {
             clearTimeout(reconnectTimer);
             reconnectTimer = null;
+        }
+
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            showToast('已达到最大重连次数，停止自动重连', 'error');
+            dom.wsStatusText.textContent = '重连失败';
+            return;
         }
 
         reconnectTimer = setTimeout(() => {

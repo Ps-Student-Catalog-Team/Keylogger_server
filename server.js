@@ -681,7 +681,12 @@ const extractionCache = {
     })
 };
 
-
+function resetExtractionCache() {
+    extractionCache.fileMTimes.clear();
+    extractionCache.lastExtractTime = 0;
+    extractionCache.passwords = [];
+    logger.debug('密码提取缓存已重置');
+}
 
 // ========== MySQL 数据库 ==========
 const dbPoolConfig = {
@@ -2073,6 +2078,7 @@ async function cleanSelectedLogs(filenames) {
     }
 
     logger.info(`[清理选中] 完成：删除 ${totalClean} 个，保存 ${totalSaved} 条密码`);
+    resetExtractionCache();
     return { results, totalClean, totalSaved };
 }
 
@@ -3109,8 +3115,9 @@ app.post('/api/maintenance/clean-expired-logs', asyncHandler(async (req, res) =>
     auditLogger.info('用户请求清理过期日志', { user: req.user, action: 'clean_expired_logs' });
 
     try {
-        await cleanExpiredLogs();
-        res.json({ success: true, message: '过期日志清理完成' });
+        const result = await cleanExpiredLogs();
+        resetExtractionCache();
+        res.json({ success: true, message: '过期日志清理完成', data: result });
     } catch (error) {
         logger.error('手动清理过期日志失败', { error: error.message });
         res.status(500).json({ success: false, error: error.message });
