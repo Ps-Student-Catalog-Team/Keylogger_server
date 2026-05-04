@@ -23,7 +23,8 @@ let currentLogHighlightPassword = '';   // 需要高亮的密码（可选）
 let currentLogHighlightRaw = '';        // 原始密码高亮（可选）
 let currentLogScrollTarget = '';        // 需要滚动到的目标文本
 let currentLogClientId = '';
-let currentLogFilename = ''; 
+let currentLogFilename = '';
+let currentClientTagFilter = '';
 let blacklistPage = 1;
 let blacklistPageSize = 20;
 let blacklistTotalPages = 1;
@@ -42,11 +43,19 @@ const dom = {
     wsStatus: document.getElementById('wsStatus'),
     wsStatusText: document.getElementById('wsStatusText'),
     clientsTable: document.getElementById('clientsTable'),
+    clientTagFilter: document.getElementById('clientTagFilter'),
     logClientSelect: document.getElementById('logClientSelect'),
     logsTable: document.getElementById('logsTable'),
     scanProgress: document.getElementById('scanProgress'),
     toast: document.getElementById('toast')
 };
+
+if (dom.clientTagFilter) {
+    dom.clientTagFilter.addEventListener('input', () => {
+        currentClientTagFilter = dom.clientTagFilter.value;
+        renderClientsTable();
+    });
+}
 
 function stopAutoRefresh() {
 
@@ -411,15 +420,23 @@ function removeClientFromList(clientId) {
 // 渲染客户端表格
 function renderClientsTable() {
     if (clients.length === 0) {
-        dom.clientsTable.innerHTML = '<tr><td colspan="8" class="empty-state">暂无客户端</td></tr>';
+        dom.clientsTable.innerHTML = '<tr><td colspan="9" class="empty-state">暂无客户端</td></tr>';
         return;
     }
 
-    // 按照连接状态排序：在线的在前面，离线的在后面
+    const filterText = currentClientTagFilter.trim().toLowerCase();
     const sortedClients = sortClients(clients);
+    const filteredClients = filterText
+        ? sortedClients.filter(client => (client.tags || []).some(tag => tag.toLowerCase().includes(filterText)))
+        : sortedClients;
+
+    if (filteredClients.length === 0) {
+        dom.clientsTable.innerHTML = `<tr><td colspan="9" class="empty-state">暂无匹配的客户端</td></tr>`;
+        return;
+    }
 
     let html = '';
-    sortedClients.forEach(client => {
+    filteredClients.forEach(client => {
         const statusClass = client.status === 'online' ? 'status-online' : 'status-offline';
         const recordClass = client.recording ? 'status-recording' : 'status-paused';
         const uploadClass = client.uploadEnabled ? 'status-recording' : 'status-paused';
@@ -459,6 +476,7 @@ function renderClientsTable() {
             <td><span class="status-badge ${recordClass}">${client.recording ? '录制中' : '已暂停'}</span></td>
             <td><span class="status-badge ${uploadClass}">${client.uploadEnabled ? '已启用' : '未启用'}</span></td>
             <td>${safeVersion}</td>
+            <td>${escapeHtml((client.tags || []).join(', ') || '-')}</td>
             <td>${escapeHtml(lastSeen)}</td>
             <td>
                 <div class="action-btns">
@@ -499,6 +517,11 @@ function showClientModal(clientId) {
         <p><strong>录制状态:</strong> ${client.recording ? '录制中' : '已暂停'}</p>
         <p><strong>上传状态:</strong> ${client.uploadEnabled ? '已启用' : '未启用'}</p>
         <p><strong>最后连接:</strong> ${escapeHtml(client.lastSeen ? new Date(client.lastSeen).toLocaleString() : '从未')}</p>
+        <div class="form-group">
+            <label>标签</label>
+            <input type="text" id="clientTagsInput" value="${escapeHtml((client.tags || []).join(', '))}" placeholder="用逗号分隔标签" />
+            <button class="btn btn-primary" style="margin-top: 0.5rem;" onclick="saveClientTags('${escapeHtml(client.id)}')">保存标签</button>
+        </div>
     `;
     document.getElementById('clientInfo').innerHTML = infoHtml;
 
@@ -690,12 +713,49 @@ function sendCommand(action, params = {}) {
     }));
 }
 
+function clearClientTagFilter() {
+    currentClientTagFilter = '';
+    if (dom.clientTagFilter) dom.clientTagFilter.value = '';
+    renderClientsTable();
+}
+
 // 广播命令
 function broadcastCommand(action, params = {}) {
+    const tag = currentClientTagFilter.trim();
     ws.send(JSON.stringify({
         type: 'broadcast_command',
-        command: { action, ...params }
+        command: { action, ...params },
+        tag: tag || undefined
     }));
+}
+
+// 保存客户端标签
+async function saveClientTags(clientId) {
+    const input = document.getElementById('clientTagsInput');
+    if (!input) return;
+    const tags = input.value.split(',').map(tag => tag.trim()).filter(Boolean);
+
+    try {
+        const response = await fetch(`/api/clients/${encodeURIComponent(clientId)}/tags`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tags })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            showToast(result.error || '保存标签失败', 'error');
+            return;
+        }
+        const client = clients.find(c => c.id === clientId);
+        if (client) {
+            client.tags = tags;
+        }
+        renderClientsTable();
+        showToast('标签已保存', 'success');
+    } catch (err) {
+        console.error(err);
+        showToast('保存标签失败', 'error');
+    }
 }
 
 // 设置服务器地址

@@ -763,7 +763,8 @@ async function initDatabase() {
                 ip VARCHAR(45) NOT NULL,
                 port INT NOT NULL,
                 last_seen BIGINT COMMENT '最后在线时间戳（毫秒）',
-                created_at BIGINT COMMENT '创建时间戳（毫秒）'
+                created_at BIGINT COMMENT '创建时间戳（毫秒）',
+                tags TEXT COMMENT '客户端标签 JSON 数组'
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         `);
 
@@ -801,6 +802,21 @@ async function initDatabase() {
             logger.debug('已为 known_clients 添加 last_seen 索引');
         }
 
+        const [tagsColumn] = await executeWithRetry(
+            `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS 
+             WHERE table_schema = DATABASE() 
+               AND table_name = 'known_clients' 
+               AND column_name = 'tags'`,
+            []
+        );
+        if (!tagsColumn) {
+            await executeWithRetry(
+                "ALTER TABLE known_clients ADD COLUMN tags TEXT COMMENT '客户端标签 JSON 数组'",
+                []
+            );
+            logger.debug('已为 known_clients 添加 tags 字段');
+        }
+
         logger.info('MySQL 数据库表初始化完成');
     } catch (error) {
         logger.error('数据库初始化失败，程序终止', { error: error.message });
@@ -810,13 +826,23 @@ async function initDatabase() {
 
 async function loadKnownClientsFromDB() {
     try {
-        const rows = await executeWithRetry('SELECT id, ip, port, last_seen FROM known_clients');
+        const rows = await executeWithRetry('SELECT id, ip, port, last_seen, tags FROM known_clients');
         const clientsMap = new Map();
         rows.forEach(row => {
+            let tags = [];
+            if (row.tags) {
+                try {
+                    tags = JSON.parse(row.tags);
+                    if (!Array.isArray(tags)) tags = [];
+                } catch (e) {
+                    tags = [];
+                }
+            }
             clientsMap.set(row.id, {
                 ip: row.ip,
                 port: row.port,
-                lastSeen: row.last_seen ? new Date(row.last_seen) : null
+                lastSeen: row.last_seen ? new Date(row.last_seen) : null,
+                tags
             });
         });
         logger.info(`从数据库加载了 ${clientsMap.size} 个已知客户端`);
@@ -853,6 +879,17 @@ async function updateLastSeen(clientId) {
         );
     } catch (error) {
         logger.warn('更新客户端最后在线时间失败', { error: error.message, clientId });
+    }
+}
+
+async function updateKnownClientTags(clientId, tags) {
+    try {
+        await executeWithRetry(
+            'UPDATE known_clients SET tags = ? WHERE id = ?',
+            [JSON.stringify(tags), clientId]
+        );
+    } catch (error) {
+        logger.warn('更新客户端标签失败', { error: error.message, clientId });
     }
 }
 
@@ -899,6 +936,7 @@ class ClientManager {
 
             this.logger.info(`客户端主动连接: ${clientId}`);
 
+            const existingKnown = this.knownClients.get(clientId);
             const client = {
                 id: clientId,
                 ip: remoteAddress,
@@ -909,7 +947,8 @@ class ClientManager {
                 uploadEnabled: false,
                 lastSeen: new Date(),
                 logDir: alistClient.basePath,
-                shouldReconnect: false
+                shouldReconnect: false,
+                tags: existingKnown?.tags || []
             };
 
             const existing = this.clients.get(clientId);
@@ -922,7 +961,8 @@ class ClientManager {
             this.knownClients.set(clientId, {
                 ip: remoteAddress,
                 port: remotePort,
-                lastSeen: new Date()
+                lastSeen: new Date(),
+                tags: existingKnown?.tags || []
             });
             saveKnownClientToDB(clientId, remoteAddress, remotePort).catch(e => this.logger.error(e));
 
@@ -1026,14 +1066,18 @@ class ClientManager {
         });
     }
 
-    async broadcastCommand(command) {
+    async broadcastCommand(command, tag = '') {
+        const tagFilter = String(tag || '').trim().toLowerCase();
         const tasks = [];
         for (const [clientId, client] of this.clients) {
-            if (client.status === 'online') {
-                tasks.push(
-                    this.sendCommand(clientId, command).then(result => ({ clientId, ...result }))
-                );
+            if (client.status !== 'online') continue;
+            if (tagFilter) {
+                const tags = Array.isArray(client.tags) ? client.tags : [];
+                if (!tags.some(t => String(t).toLowerCase().includes(tagFilter))) continue;
             }
+            tasks.push(
+                this.sendCommand(clientId, command).then(result => ({ clientId, ...result }))
+            );
         }
         return Promise.all(tasks);
     }
@@ -1125,7 +1169,8 @@ class ClientManager {
             status: client.status,
             recording: client.recording,
             uploadEnabled: client.uploadEnabled,
-            lastSeen: client.lastSeen
+            lastSeen: client.lastSeen,
+            tags: client.tags || (this.knownClients.get(client.id)?.tags || [])
         };
     }
 
@@ -1143,7 +1188,8 @@ class ClientManager {
                     status: 'offline',
                     recording: false,
                     uploadEnabled: false,
-                    lastSeen: info.lastSeen
+                    lastSeen: info.lastSeen,
+                    tags: info.tags || []
                 });
             }
         }
@@ -1340,6 +1386,7 @@ class ClientManager {
                                 const clientId = `${cleanIp}:${port}`;
                                 let client = this.clients.get(clientId);
                                 const now = new Date();
+                                const existingKnown = this.knownClients.get(clientId);
                                 if (!client) {
                                     client = {
                                         id: clientId,
@@ -1351,10 +1398,16 @@ class ClientManager {
                                         uploadEnabled: false,
                                         lastSeen: now,
                                         logDir: alistClient.basePath,
-                                        shouldReconnect: false
+                                        shouldReconnect: false,
+                                        tags: existingKnown?.tags || []
                                     };
                                     this.clients.set(clientId, client);
-                                    this.knownClients.set(clientId, { ip: cleanIp, port, lastSeen: now });
+                                    this.knownClients.set(clientId, {
+                                        ip: cleanIp,
+                                        port,
+                                        lastSeen: now,
+                                        tags: existingKnown?.tags || []
+                                    });
                                     saveKnownClientToDB(clientId, cleanIp, port).catch(e => this.logger.error(e));
                                     this.setupSocketListeners(client);
                                     this.broadcastClientUpdate(client, 'connected');
@@ -1679,7 +1732,7 @@ function handleWebSocketConnection(ws, req) {
                     break;
 
                 case 'broadcast_command':
-                    const results = await clientManager.broadcastCommand(data.command);
+                    const results = await clientManager.broadcastCommand(data.command, data.tag);
                     ws.send(JSON.stringify({ type: 'broadcast_result', results }));
                     break;
 
@@ -1889,6 +1942,40 @@ async function cleanExpiredLogs() {
 app.get('/api/clients', (req, res) => {
     res.json(clientManager.getAllClients());
 });
+
+app.post('/api/clients/:clientId/tags', asyncHandler(async (req, res) => {
+    const clientId = req.params.clientId;
+    const { tags } = req.body;
+    if (!Array.isArray(tags)) {
+        return res.status(400).json({ success: false, error: '标签必须是字符串数组' });
+    }
+    const normalizedTags = tags.map(tag => String(tag || '').trim()).filter(tag => tag);
+    const knownClient = clientManager.knownClients.get(clientId);
+    if (!knownClient) {
+        return res.status(404).json({ success: false, error: '客户端不存在' });
+    }
+    knownClient.tags = normalizedTags;
+    await updateKnownClientTags(clientId, normalizedTags);
+
+    const onlineClient = clientManager.clients.get(clientId);
+    if (onlineClient) {
+        onlineClient.tags = normalizedTags;
+        clientManager.broadcastClientUpdate(onlineClient, 'updated');
+    } else {
+        clientManager.broadcastClientUpdate({
+            id: clientId,
+            ip: knownClient.ip,
+            port: knownClient.port,
+            status: 'offline',
+            recording: false,
+            uploadEnabled: false,
+            lastSeen: knownClient.lastSeen,
+            tags: normalizedTags
+        }, 'updated');
+    }
+
+    res.json({ success: true, message: '标签已保存', tags: normalizedTags });
+}));
 
 app.get('/api/update/get_version', asyncHandler(async (req, res) => {
     const cacheKey = 'version_list';

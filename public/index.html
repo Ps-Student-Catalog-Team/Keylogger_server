@@ -1162,6 +1162,8 @@
                         <div class="spinner"></div>
                         <span>扫描中...</span>
                     </div>
+                    <input type="text" id="clientTagFilter" placeholder="按标签筛选" style="width: 180px; margin-left: 1rem;">
+                    <button class="btn btn-secondary" onclick="clearClientTagFilter()">清除</button>
                     <div style="flex: 1;"></div>
                     <button class="btn btn-warning" onclick="broadcastCommand('pause_record')">
                         <i class="fas fa-pause"></i> 全部暂停
@@ -1188,13 +1190,14 @@
                                 <th>录制</th>
                                 <th>上传</th>
                                 <th>版本</th>
+                                <th>标签</th>
                                 <th>最后连接</th>
                                 <th>操作</th>
                             </tr>
                         </thead>
                         <tbody id="clientsTable">
                             <tr>
-                                <td colspan="7" class="empty-state">暂无客户端连接</td>
+                                <td colspan="9" class="empty-state">暂无客户端连接</td>
                             </tr>
                         </tbody>
                     </table>
