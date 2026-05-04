@@ -25,6 +25,16 @@ let currentLogScrollTarget = '';        // 需要滚动到的目标文本
 let currentLogClientId = '';
 let currentLogFilename = '';
 let currentClientTagFilter = '';
+let currentConsoleClientId = null;
+let currentConsoleSubscribedClientId = null;
+let consoleMessages = [];
+let pendingConsoleMessages = [];
+let consolePaused = false;
+let consoleViewMode = 'processed';
+let consoleFilterText = '';
+let consoleHistory = [];
+let consoleHistoryIndex = -1;
+const CONSOLE_MAX_MESSAGES = 1000;
 let blacklistPage = 1;
 let blacklistPageSize = 20;
 let blacklistTotalPages = 1;
@@ -45,6 +55,12 @@ const dom = {
     clientsTable: document.getElementById('clientsTable'),
     clientTagFilter: document.getElementById('clientTagFilter'),
     logClientSelect: document.getElementById('logClientSelect'),
+    consoleFilterInput: document.getElementById('consoleFilterInput'),
+    consoleOutput: document.getElementById('consoleOutput'),
+    consoleInput: document.getElementById('consoleInput'),
+    consolePauseBtn: document.getElementById('consolePauseBtn'),
+    consoleViewRawBtn: document.getElementById('consoleViewRawBtn'),
+    consoleViewProcessedBtn: document.getElementById('consoleViewProcessedBtn'),
     logsTable: document.getElementById('logsTable'),
     scanProgress: document.getElementById('scanProgress'),
     toast: document.getElementById('toast')
@@ -54,6 +70,42 @@ if (dom.clientTagFilter) {
     dom.clientTagFilter.addEventListener('input', () => {
         currentClientTagFilter = dom.clientTagFilter.value;
         renderClientsTable();
+    });
+}
+
+if (dom.consoleFilterInput) {
+    dom.consoleFilterInput.addEventListener('input', () => {
+        consoleFilterText = dom.consoleFilterInput.value;
+        renderConsoleMessages();
+    });
+}
+
+if (dom.consoleInput) {
+    dom.consoleInput.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            if (consoleHistory.length === 0) return;
+            if (consoleHistoryIndex < 0) {
+                consoleHistoryIndex = consoleHistory.length - 1;
+            } else if (consoleHistoryIndex > 0) {
+                consoleHistoryIndex -= 1;
+            }
+            dom.consoleInput.value = consoleHistory[consoleHistoryIndex] || '';
+        } else if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            if (consoleHistory.length === 0) return;
+            if (consoleHistoryIndex < 0) return;
+            consoleHistoryIndex += 1;
+            if (consoleHistoryIndex >= consoleHistory.length) {
+                consoleHistoryIndex = -1;
+                dom.consoleInput.value = '';
+            } else {
+                dom.consoleInput.value = consoleHistory[consoleHistoryIndex] || '';
+            }
+        } else if (event.key === 'Enter') {
+            event.preventDefault();
+            sendConsoleInput();
+        }
     });
 }
 
@@ -281,6 +333,12 @@ function handleWebSocketMessage(data) {
             }
             break;
 
+        case 'console_message':
+            if (data.clientId === currentConsoleClientId) {
+                pushConsoleMessage(data);
+            }
+            break;
+
         case 'command_result':
             console.log('命令结果:', data.result);
             if (data.result.success) {
@@ -398,6 +456,113 @@ function handleWebSocketMessage(data) {
     }
 }
 
+function formatConsoleTimestamp(timestamp) {
+    const date = new Date(timestamp);
+    const pad = (value, length = 2) => String(value).padStart(length, '0');
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
+}
+
+function setConsoleViewMode(mode, render = true) {
+    consoleViewMode = mode === 'raw' ? 'raw' : 'processed';
+    if (dom.consoleViewRawBtn) {
+        dom.consoleViewRawBtn.classList.toggle('active', consoleViewMode === 'raw');
+    }
+    if (dom.consoleViewProcessedBtn) {
+        dom.consoleViewProcessedBtn.classList.toggle('active', consoleViewMode === 'processed');
+    }
+    if (render) renderConsoleMessages();
+}
+
+function toggleConsolePause() {
+    consolePaused = !consolePaused;
+    if (dom.consolePauseBtn) {
+        dom.consolePauseBtn.textContent = consolePaused ? '继续滚动' : '暂停滚动';
+    }
+    if (!consolePaused && pendingConsoleMessages.length > 0) {
+        consoleMessages.push(...pendingConsoleMessages);
+        pendingConsoleMessages = [];
+        while (consoleMessages.length > CONSOLE_MAX_MESSAGES) {
+            consoleMessages.shift();
+        }
+        renderConsoleMessages();
+    }
+}
+
+function subscribeConsole(clientId) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (currentConsoleSubscribedClientId === clientId) return;
+    unsubscribeConsole();
+    currentConsoleSubscribedClientId = clientId;
+    ws.send(JSON.stringify({ type: 'subscribe_console', clientId }));
+}
+
+function unsubscribeConsole() {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !currentConsoleSubscribedClientId) return;
+    ws.send(JSON.stringify({ type: 'unsubscribe_console', clientId: currentConsoleSubscribedClientId }));
+    currentConsoleSubscribedClientId = null;
+}
+
+function pushConsoleMessage(data) {
+    const entry = {
+        timestamp: data.timestamp || Date.now(),
+        raw: data.raw,
+        processed: data.processed
+    };
+    if (consolePaused) {
+        pendingConsoleMessages.push(entry);
+    } else {
+        consoleMessages.push(entry);
+    }
+    while (consoleMessages.length + pendingConsoleMessages.length > CONSOLE_MAX_MESSAGES) {
+        if (consoleMessages.length > 0) {
+            consoleMessages.shift();
+        } else {
+            pendingConsoleMessages.shift();
+        }
+    }
+    if (!consolePaused) {
+        renderConsoleMessages();
+    }
+}
+
+function renderConsoleMessages() {
+    if (!dom.consoleOutput) return;
+    const visible = consoleMessages.filter(item => {
+        if (!consoleFilterText) return true;
+        const text = consoleViewMode === 'raw' ? JSON.stringify(item.raw) : item.processed;
+        return text.toLowerCase().includes(consoleFilterText.toLowerCase());
+    });
+    const lines = visible.map(item => {
+        const stamp = formatConsoleTimestamp(item.timestamp);
+        const body = consoleViewMode === 'raw' ? JSON.stringify(item.raw, null, 2) : item.processed;
+        return `[${stamp}] ${body}`;
+    });
+    dom.consoleOutput.textContent = lines.join('\n');
+    if (!consolePaused) {
+        dom.consoleOutput.parentElement?.scrollTo({ top: dom.consoleOutput.parentElement.scrollHeight, behavior: 'smooth' });
+    }
+}
+
+function sendConsoleInput() {
+    if (!currentConsoleClientId || !dom.consoleInput) {
+        return;
+    }
+    const value = dom.consoleInput.value.trim();
+    if (!value) return;
+    consoleHistory = consoleHistory.filter(item => item !== value);
+    consoleHistory.push(value);
+    if (consoleHistory.length > 50) {
+        consoleHistory.shift();
+    }
+    consoleHistoryIndex = -1;
+    ws.send(JSON.stringify({
+        type: 'command',
+        clientId: currentConsoleClientId,
+        command: { action: 'console_command', payload: value }
+    }));
+    dom.consoleInput.value = '';
+}
+
 // 更新客户端列表中的某个客户端
 function updateClientInList(client) {
     const index = clients.findIndex(c => c.id === client.id);
@@ -505,7 +670,20 @@ function showClientModal(clientId) {
     const client = clients.find(c => c.id === clientId);
     if (!client) return;
 
+    unsubscribeConsole();
     currentClientId = clientId;
+    currentConsoleClientId = clientId;
+    currentConsoleSubscribedClientId = null;
+    consoleMessages = [];
+    pendingConsoleMessages = [];
+    consolePaused = false;
+    consoleFilterText = '';
+    consoleHistoryIndex = -1;
+    if (dom.consoleFilterInput) dom.consoleFilterInput.value = '';
+    if (dom.consolePauseBtn) dom.consolePauseBtn.textContent = '暂停滚动';
+    setConsoleViewMode('processed', false);
+    renderConsoleMessages();
+
     document.getElementById('clientModalTitle').textContent = `客户端: ${client.ip}:${client.port}`;
     
     // 概览信息
@@ -529,6 +707,7 @@ function showClientModal(clientId) {
     loadClientLogs(clientId);
 
     document.getElementById('clientModal').classList.add('show');
+    subscribeConsole(clientId);
 }
 
 // 获取日志文件信息
@@ -1184,6 +1363,13 @@ function showModal(modalId) {
 
 function hideModal(modalId) {
     document.getElementById(modalId).classList.remove('show');
+}
+
+function hideClientModal() {
+    unsubscribeConsole();
+    currentConsoleClientId = null;
+    currentConsoleSubscribedClientId = null;
+    document.getElementById('clientModal').classList.remove('show');
 }
 
 // 保存设置

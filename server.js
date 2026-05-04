@@ -908,6 +908,8 @@ class ClientManager {
         this.clients = new Map();
         this.knownClients = new Map();
         this.webClients = new Set();
+        this.consoleSubscriptions = new Map(); // clientId -> Set<WebSocket>
+        this.consoleSubscriptionsByWs = new Map(); // WebSocket -> Set<clientId>
         this.tcpServer = null;
         this.heartbeatTimer = null;
         this.reconnectLimit = pLimit(CONFIG.maxConcurrentReconnects);
@@ -1041,12 +1043,60 @@ class ClientManager {
         }
     }
 
+    const processed = this.formatConsoleMessage(response);
+    this.sendConsoleMessage(client.id, response, processed);
+
     this.broadcastToWeb({
         type: 'client_response',
         clientId: client.id,
         response
     });
 }
+
+    formatConsoleMessage(response) {
+        if (!response || typeof response !== 'object') {
+            return `收到原始响应: ${String(response)}`;
+        }
+
+        const pieces = [];
+        if (response.status !== undefined) {
+            pieces.push(`状态: ${response.status}`);
+        }
+        if (response.error) {
+            pieces.push(`错误: ${response.error}`);
+        }
+        if (response.action) {
+            pieces.push(`动作: ${response.action}`);
+        }
+        if (response.message) {
+            pieces.push(`${response.message}`);
+        }
+        if (response.result !== undefined) {
+            pieces.push(`结果: ${JSON.stringify(response.result)}`);
+        }
+        if (response.data && typeof response.data === 'object') {
+            const knownKeys = [];
+            if (response.data.recording !== undefined) {
+                knownKeys.push(`录制: ${response.data.recording ? '开启' : '关闭'}`);
+            }
+            if (response.data.upload_enabled !== undefined) {
+                knownKeys.push(`上传: ${response.data.upload_enabled ? '启用' : '禁用'}`);
+            }
+            if (response.data.version) {
+                knownKeys.push(`版本: ${response.data.version}`);
+            }
+            if (response.data.log_dir) {
+                knownKeys.push(`日志目录: ${response.data.log_dir}`);
+            }
+            if (knownKeys.length > 0) {
+                pieces.push(knownKeys.join(' | '));
+            }
+        }
+        if (pieces.length === 0) {
+            return `收到原始响应: ${JSON.stringify(response)}`;
+        }
+        return pieces.join(' | ');
+    }
 
     sendCommand(clientId, command) {
         const client = this.clients.get(clientId);
@@ -1206,6 +1256,90 @@ class ClientManager {
 
     removeWebClient(ws) {
         this.webClients.delete(ws);
+        this.removeConsoleSubscriptions(ws);
+    }
+
+    subscribeConsole(ws, clientId) {
+        if (!ws || !clientId) return;
+        let subs = this.consoleSubscriptions.get(clientId);
+        if (!subs) {
+            subs = new Set();
+            this.consoleSubscriptions.set(clientId, subs);
+        }
+        subs.add(ws);
+
+        let wsSubs = this.consoleSubscriptionsByWs.get(ws);
+        if (!wsSubs) {
+            wsSubs = new Set();
+            this.consoleSubscriptionsByWs.set(ws, wsSubs);
+        }
+        wsSubs.add(clientId);
+    }
+
+    unsubscribeConsole(ws, clientId) {
+        if (!ws || !clientId) return;
+        const subs = this.consoleSubscriptions.get(clientId);
+        if (subs) {
+            subs.delete(ws);
+            if (subs.size === 0) {
+                this.consoleSubscriptions.delete(clientId);
+            }
+        }
+        const wsSubs = this.consoleSubscriptionsByWs.get(ws);
+        if (wsSubs) {
+            wsSubs.delete(clientId);
+            if (wsSubs.size === 0) {
+                this.consoleSubscriptionsByWs.delete(ws);
+            }
+        }
+    }
+
+    removeConsoleSubscriptions(ws) {
+        const wsSubs = this.consoleSubscriptionsByWs.get(ws);
+        if (!wsSubs) return;
+        for (const clientId of wsSubs) {
+            const subs = this.consoleSubscriptions.get(clientId);
+            if (subs) {
+                subs.delete(ws);
+                if (subs.size === 0) {
+                    this.consoleSubscriptions.delete(clientId);
+                }
+            }
+        }
+        this.consoleSubscriptionsByWs.delete(ws);
+    }
+
+    sendConsoleMessage(clientId, raw, processed) {
+        const subs = this.consoleSubscriptions.get(clientId);
+        if (!subs || subs.size === 0) return;
+        const message = JSON.stringify({
+            type: 'console_message',
+            clientId,
+            timestamp: Date.now(),
+            raw,
+            processed
+        });
+        const toRemove = [];
+        subs.forEach(ws => {
+            if (ws.readyState !== WebSocket.OPEN) {
+                toRemove.push(ws);
+                return;
+            }
+            ws.send(message, (err) => {
+                if (err) this.logger.debug('控制台消息发送失败', { error: err.message });
+            });
+        });
+        toRemove.forEach(ws => {
+            subs.delete(ws);
+            const wsSubs = this.consoleSubscriptionsByWs.get(ws);
+            if (wsSubs) {
+                wsSubs.delete(clientId);
+                if (wsSubs.size === 0) this.consoleSubscriptionsByWs.delete(ws);
+            }
+        });
+        if (subs.size === 0) {
+            this.consoleSubscriptions.delete(clientId);
+        }
     }
 
     broadcastClientUpdate(client, eventType) {
@@ -1773,7 +1907,25 @@ function handleWebSocketConnection(ws, req) {
                     }
                     ws.send(JSON.stringify({ type: 'disconnected', clientId: data.clientId }));
                     break;
-                
+
+                case 'subscribe_console':
+                    if (data.clientId) {
+                        clientManager.subscribeConsole(ws, data.clientId);
+                        ws.send(JSON.stringify({ type: 'subscribe_console_result', success: true, clientId: data.clientId }));
+                    } else {
+                        ws.send(JSON.stringify({ type: 'subscribe_console_result', success: false, error: 'clientId 不能为空' }));
+                    }
+                    break;
+
+                case 'unsubscribe_console':
+                    if (data.clientId) {
+                        clientManager.unsubscribeConsole(ws, data.clientId);
+                        ws.send(JSON.stringify({ type: 'unsubscribe_console_result', success: true, clientId: data.clientId }));
+                    } else {
+                        ws.send(JSON.stringify({ type: 'unsubscribe_console_result', success: false, error: 'clientId 不能为空' }));
+                    }
+                    break;
+
                 case 'delete_client':
                     try {
                         await clientManager.deleteKnownClient(data.clientId);

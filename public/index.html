@@ -1024,6 +1024,85 @@
             display: block;
         }
 
+        .console-toolbar {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .console-view-toggle {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .terminal-button {
+            padding: 0.55rem 1rem;
+            border: 1px solid var(--gray-light);
+            background: var(--light);
+            color: var(--text);
+            cursor: pointer;
+            border-radius: 6px;
+            transition: all 0.2s ease;
+            font-size: 0.95rem;
+        }
+
+        .terminal-button.active,
+        .terminal-button:hover {
+            background: var(--primary);
+            color: #fff;
+            border-color: var(--primary);
+        }
+
+        .console-toolbar input {
+            flex: 1;
+            min-width: 220px;
+            padding: 0.7rem 0.9rem;
+            border: 1px solid var(--gray-light);
+            border-radius: 8px;
+            background: #0d1117;
+            color: #d0f0b7;
+        }
+
+        .console-panel {
+            background: #0b1118;
+            border: 1px solid #21303f;
+            border-radius: 8px;
+            padding: 1rem;
+            min-height: 320px;
+            max-height: 420px;
+            overflow: auto;
+            font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+            color: #b7f2a1;
+        }
+
+        .console-output {
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin: 0;
+            font-size: 0.92rem;
+            line-height: 1.5;
+        }
+
+        .console-input-area {
+            margin-top: 0.75rem;
+        }
+
+        .console-input-area input {
+            width: 100%;
+            padding: 0.85rem 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--gray-light);
+            background: #0d1118;
+            color: #d0f0b7;
+            font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+        }
+
+        .console-input-area input::placeholder {
+            color: #7fae7f;
+        }
+
         .empty-state {
             text-align: center;
             padding: 4rem 2rem;
@@ -1414,12 +1493,13 @@
         <div class="modal-content" style="max-width: 700px;">
             <div class="modal-header">
                 <h3 id="clientModalTitle">客户端详情</h3>
-                <button class="close-btn" onclick="hideModal('clientModal')">&times;</button>
+                <button class="close-btn" onclick="hideClientModal()">&times;</button>
             </div>
             <div class="tabs">
                 <div class="tab active" data-tab="overview">概览</div>
                 <div class="tab" data-tab="control">控制</div>
                 <div class="tab" data-tab="logs">日志</div>
+                <div class="tab" data-tab="console">控制台</div>
             </div>
             <div class="tab-content active" id="overviewTab">
                 <div id="clientInfo"></div>
@@ -1472,6 +1552,22 @@
                         <input type="number" id="serverPort" placeholder="端口" value="5244" style="width: 100px;">
                         <button class="btn btn-primary" onclick="setServer()">设置</button>
                     </div>
+                </div>
+            </div>
+            <div class="tab-content" id="consoleTab">
+                <div class="console-toolbar">
+                    <div class="console-view-toggle">
+                        <button class="terminal-button active" id="consoleViewRawBtn" onclick="setConsoleViewMode('raw')">原始响应</button>
+                        <button class="terminal-button" id="consoleViewProcessedBtn" onclick="setConsoleViewMode('processed')">后端输出</button>
+                    </div>
+                    <input type="text" id="consoleFilterInput" placeholder="过滤关键字" />
+                    <button class="btn btn-secondary" id="consolePauseBtn" onclick="toggleConsolePause()">暂停滚动</button>
+                </div>
+                <div class="console-panel">
+                    <pre id="consoleOutput" class="console-output"></pre>
+                </div>
+                <div class="console-input-area">
+                    <input type="text" id="consoleInput" placeholder="输入命令并回车发送" autocomplete="off" />
                 </div>
             </div>
             <div class="tab-content" id="logsTab">
