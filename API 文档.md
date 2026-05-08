@@ -270,7 +270,7 @@
 
 **请求格式**：
 ```json
-{"action": "set_server", "host": "10.88.202.73", "port": 5244}
+{"action": "set_server", "host": "10.88.202.59", "port": 5244}
 ```
 
 **参数**：
@@ -283,7 +283,7 @@
   "status": "ok",
   "type": "server_configured",
   "data": {
-    "host": "10.88.202.73",
+    "host": "10.88.202.59",
     "port": 5244
   }
 }
