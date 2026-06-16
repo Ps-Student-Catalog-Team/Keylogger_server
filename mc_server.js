@@ -4,6 +4,8 @@ const os = require('os');
 const { spawn } = require('child_process');
 const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
+const pidusage = require('pidusage');
+
 
 const LOG_MAX_LINES = 2000;
 const PLAYER_COUNT_REGEX = /There are\s+(\d+)\s+of\s+a\s+max\s+of\s+(\d+)\s+players\s+online/i;
@@ -572,52 +574,27 @@ class McServer {
   }
 
   async getWindowsProcessStats(pid) {
+    // 防止并发重叠，保持与原来一致
     if (this._statsPending) return null;
     this._statsPending = true;
+
     try {
-        // 输出进程名称和内存（名称应为 java）
-        const out = await this.runChildProcess('powershell.exe', [
-            '-NoProfile', '-NonInteractive', '-Command',
-            `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p -and $p.Name -eq 'java') { Write-Host $p.Name; Write-Host $p.TotalProcessorTime.TotalSeconds; Write-Host $p.WorkingSet64 }`
-        ], { windowsHide: true });
-
-        if (!out || !out.trim()) {
-            this.pushLog(`进程 ${pid} 不存在或不是 Java 进程，无法获取统计信息`);
-            return null;
-        }
-
-        const lines = out.trim().split(/\r?\n/);
-        if (lines.length < 3) return null;
-
-        const processName = lines[0].trim();
-        if (processName.toLowerCase() !== 'java') {
-            this.pushLog(`进程 ${pid} 不是 Java 进程 (实际: ${processName})，忽略统计`);
-            return null;
-        }
-
-        const totalSeconds = parseFloat(lines[1]);
-        let used = Number(lines[2].replace(/,/g, ''));   // 移除千分位逗号
-        if (isNaN(totalSeconds) || isNaN(used)) return null;
-
-        const now = Date.now();
-        let cpuPercent = 0;
-        const cpus = os.cpus().length;
-        if (this.lastCpuPid === pid && this.lastCpuTimestamp && this.lastCpuTime !== null) {
-            const elapsed = (now - this.lastCpuTimestamp) / 1000;
-            const delta = totalSeconds - this.lastCpuTime;
-            if (elapsed > 0 && delta >= 0) {
-                cpuPercent = Math.min(100, Math.max(0, (delta / elapsed) / cpus * 100));
+        // pidusage 返回一个 Promise，直接获取 CPU 百分比和内存（字节）
+        const stats = await pidusage(pid);
+        // 构造与原来相同格式的返回对象
+        return {
+            cpu: Math.min(100, Math.max(0, stats.cpu)),   // 确保在 0-100 之间
+            memory: {
+                used: stats.memory,
+                total: os.totalmem()
             }
-        }
-        this.lastCpuPid = pid;
-        this.lastCpuTime = totalSeconds;
-        this.lastCpuTimestamp = now;
-
-        return { cpu: cpuPercent, memory: { used, total: os.totalmem() } };
-    } catch (e) {
-        this.pushLog(`获取 Windows 进程统计异常: ${e.message}`);
+        };
+    } catch (err) {
+        // pidusage 在进程不存在或无权限时会抛出错误，例如 "Process not found"
+        this.pushLog(`获取进程 ${pid} 统计失败: ${err.message}`);
         return null;
     } finally {
+        // 释放并发锁
         this._statsPending = false;
     }
   }
