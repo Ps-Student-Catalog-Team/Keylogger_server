@@ -717,62 +717,61 @@ class McServer {
     if (this.process) return false;
     const command = this.getLaunchCommand();
     if (!command) {
-        this.pushLog('启动命令未配置，无法启动');
-        return false;
+      this.pushLog('启动命令未配置，无法启动');
+      return false;
     }
     const cwd = this.resolveWorkingDir();
     this.ensureLogDir();
 
     try {
-        this.manualStopRequested = false;
-        if (manual) this.restartAttempts = 0;
-        const launchArgs = this.getLaunchArgs();
-        if (launchArgs.length === 0) {
-          this.pushLog('启动命令未配置，无法启动');
-          return false;
-        }
-        const program = launchArgs[0];
-        const args = launchArgs.slice(1);
-        this.process = spawn(program, args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-        const actualPid = this.process.pid;
-        this.pushLog(`启动命令: ${program} ${args.join(' ')}，PID: ${actualPid}`);
+      this.manualStopRequested = false;
+      if (manual) this.restartAttempts = 0;
+      const launchArgs = this.getLaunchArgs();
+      if (launchArgs.length === 0) {
+        this.pushLog('启动命令未配置，无法启动');
+        return false;
+      }
+      const program = launchArgs[0];
+      const args = launchArgs.slice(1);
+      this.process = spawn(program, args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const actualPid = this.process.pid;
+      this.pushLog(`启动命令: ${program} ${args.join(' ')}，PID: ${actualPid}`);
 
-        if (this.process.stdout) {
-            this.process.stdout.on('data', (data) => this.pushLog(this.decodeProcessOutput(data)));
-        }
-        if (this.process.stderr) {
-            this.process.stderr.on('data', (data) => this.pushLog('[STDERR] ' + this.decodeProcessOutput(data)));
-        }
+      if (this.process.stdout) {
+        this.process.stdout.on('data', (data) => this.pushLog(this.decodeProcessOutput(data)));
+      }
+      if (this.process.stderr) {
+        this.process.stderr.on('data', (data) => this.pushLog('[STDERR] ' + this.decodeProcessOutput(data)));
+      }
 
-        this.process.on('close', (code) => {
-            this.pushLog(`进程已退出，退出码: ${code}`);
-            this.process = null;
-            this.stopPlayerListPolling();
-            this.stopStatsPolling();
-            this.stopTpsPolling();
-            this.clearRestartResetTimer();
-            if (!this.manualStopRequested && this.config.autoRestart) {
-                this.scheduleAutoRestart();
-            }
-        });
-        this.process.on('error', (err) => {
-            this.pushLog(`启动失败: ${err.message}`);
-            this.process = null;
-            this.clearRestartResetTimer();
-        });
-
-        this.startPlayerListPolling();
-        this.startStatsPolling();
-        this.startTpsPolling();
-        this.resetRestartAttemptsAfterStableRun();
-        return true;
+      this.process.on('close', (code) => {
+        this.pushLog(`进程已退出，退出码: ${code}`);
+        this.process = null;
+        this.stopPlayerListPolling();
+        this.stopStatsPolling();
+        this.stopTpsPolling();
+        this.clearRestartResetTimer();
+        if (!this.manualStopRequested && this.config.autoRestart) {
+          this.scheduleAutoRestart();
+        }
+      });
+      this.process.on('error', (err) => {
+        this.pushLog(`启动失败: ${err.message}`);
+        this.process = null;
+        this.clearRestartResetTimer();
+      });
+      
+      this.startStatsPolling();      // 保留性能统计轮询（CPU/内存/TPS）
+      this.startTpsPolling();        // 保留 TPS 轮询（但 TPS 输出已被过滤，不会刷日志）
+      this.resetRestartAttemptsAfterStableRun();
+      return true;
     } catch (e) {
       this.pushLog(`启动异常: ${e.message}`);
       console.error('[mc_server] 启动失败详情:', e);
       this.process = null;
       this.clearRestartResetTimer();
       return false;
-  }
+    }
   }
 
   stop() {
