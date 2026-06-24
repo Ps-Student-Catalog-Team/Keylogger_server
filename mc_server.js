@@ -6,6 +6,19 @@ const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
 const pidusage = require('pidusage');
 
+let archiver = null;
+let extractZip = null;
+try {
+  archiver = require('archiver');
+} catch (e) {
+  archiver = null;
+}
+try {
+  extractZip = require('extract-zip');
+} catch (e) {
+  extractZip = null;
+}
+
 
 const LOG_MAX_LINES = 2000;
 const PLAYER_COUNT_REGEX = /There are\s+(\d+)\s+of\s+a\s+max\s+of\s+(\d+)\s+players\s+online/i;
@@ -35,9 +48,9 @@ class McServer {
       autoRestart: false,
       autoRestartDelaySeconds: 5,
       autoRestartMaxRetries: 3,
-      playerListIntervalSeconds: 1,
-      tpsIntervalSeconds: 1,
-      statsIntervalSeconds: 1
+      playerListIntervalSeconds: 5,
+      tpsIntervalSeconds: 5,
+      statsIntervalSeconds: 5
     }, config || {});
 
     this.logs = [];
@@ -611,62 +624,22 @@ class McServer {
     return parts[0] || 0;
   }
 
-  getUnixProcessStats(pid) {
-    return new Promise((resolve) => {
-      const stats = [];
-      const gather = (processId, callback) => {
-        const proc = spawn('ps', ['-p', String(processId), '-o', 'cputime=', '-o', 'rss='], { windowsHide: true });
-        let output = '';
-        proc.stdout.on('data', (data) => { output += data.toString(); });
-        proc.on('close', () => {
-          const parts = output.trim().split(/\s+/);
-          if (parts.length >= 2) {
-            stats.push({ cpu: this.parseCpuTime(parts[0] || '0'), rss: parseInt(parts[1] || '0', 10) * 1024 });
-          }
-          callback();
-        });
-        proc.on('error', () => callback());
+  async getUnixProcessStats(pid) {
+    if (!pid) return null;
+    if (this._statsPending) return null;
+    this._statsPending = true;
+    try {
+      const stats = await pidusage(pid);
+      return {
+        cpu: Math.min(100, Math.max(0, stats.cpu)),
+        memory: { used: stats.memory, total: os.totalmem() }
       };
-
-      const gatherChildren = (processId, callback) => {
-        const proc = spawn('ps', ['--ppid', String(processId), '-o', 'pid='], { windowsHide: true });
-        let output = '';
-        proc.stdout.on('data', (data) => { output += data.toString(); });
-        proc.on('close', () => {
-          const childPids = output.trim().split(/\s+/).filter(Boolean);
-          if (childPids.length === 0) return callback();
-          let remaining = childPids.length;
-          childPids.forEach((childPid) => {
-            gather(childPid, () => {
-              remaining -= 1;
-              if (remaining === 0) callback();
-            });
-          });
-        });
-        proc.on('error', () => callback());
-      };
-
-      gather(pid, () => {
-        gatherChildren(pid, () => {
-          const totalCpu = stats.reduce((sum, item) => sum + (Number.isFinite(item.cpu) ? item.cpu : 0), 0);
-          const totalUsed = stats.reduce((sum, item) => sum + (Number.isFinite(item.rss) ? item.rss : 0), 0);
-          const now = Date.now();
-          let cpuPercent = 0;
-          const cpus = os.cpus().length;
-          if (this.lastCpuPid === pid && this.lastCpuTimestamp && this.lastCpuTime !== null) {
-            const elapsed = (now - this.lastCpuTimestamp) / 1000;
-            const delta = totalCpu - this.lastCpuTime;
-            if (elapsed > 0 && delta >= 0) {
-              cpuPercent = Math.min(100, Math.max(0, (delta / elapsed) / cpus * 100));
-            }
-          }
-          this.lastCpuPid = pid;
-          this.lastCpuTime = totalCpu;
-          this.lastCpuTimestamp = now;
-          resolve({ cpu: cpuPercent, memory: { used: totalUsed, total: os.totalmem() } });
-        });
-      });
-    });
+    } catch (err) {
+      this.pushLog(`获取进程 ${pid} 统计失败: ${err.message}`);
+      return null;
+    } finally {
+      this._statsPending = false;
+    }
   }
 
   startStatsPolling() {
@@ -697,9 +670,16 @@ class McServer {
   async checkCompressionTools() {
     try {
       if (process.platform === 'win32') {
-        const out = await this.runChildProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "(Get-Command Compress-Archive -ErrorAction SilentlyContinue).Name"], { windowsHide: true });
-        if (!out || !out.trim()) {
-          this.pushLog('警告：系统未检测到 PowerShell 的 Compress-Archive，备份压缩可能失败');
+        if (!archiver || !extractZip) {
+          this.pushLog('警告：未检测到 archiver 或 extract-zip 模块；将回退到 PowerShell（若可用）进行压缩/解压');
+          try {
+            const out = await this.runChildProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "(Get-Command Compress-Archive -ErrorAction SilentlyContinue).Name"], { windowsHide: true });
+            if (!out || !out.trim()) {
+              this.pushLog('警告：系统未检测到 PowerShell 的 Compress-Archive，备份压缩可能失败');
+            }
+          } catch (e) {
+            this.pushLog('警告：无法检测 PowerShell 的 Compress-Archive，备份压缩可能失败');
+          }
         }
       } else {
         try {
@@ -907,36 +887,77 @@ class McServer {
   }
 
   async createBackupArchive(worldDirs, dest, cwd) {
-    if (process.platform === 'win32') {
-      const quotedPaths = worldDirs.map((dir) => `'${dir.replace(/'/g, "''")}'`).join(', ');
-      const quotedDest = dest.replace(/'/g, "''");
-      await this.runChildProcess('powershell.exe', [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `Compress-Archive -Path ${quotedPaths} -DestinationPath '${quotedDest}' -Force`
-      ], { cwd });
-      return;
+    const cwdResolved = cwd || this.resolveWorkingDir();
+    const destPath = path.isAbsolute(dest) ? dest : path.join(cwdResolved, dest);
+    const destLower = String(destPath).toLowerCase();
+
+    if (destLower.endsWith('.zip') || process.platform === 'win32') {
+      if (archiver) {
+        await new Promise((resolve, reject) => {
+          const output = fs.createWriteStream(destPath);
+          const archive = archiver('zip', { zlib: { level: 9 } });
+          output.on('close', resolve);
+          output.on('error', reject);
+          archive.on('warning', (err) => {
+            if (err.code === 'ENOENT') this.pushLog(`archiver warning: ${err.message}`);
+            else reject(err);
+          });
+          archive.on('error', reject);
+          archive.pipe(output);
+          for (const dir of worldDirs) {
+            const full = path.isAbsolute(dir) ? dir : path.join(cwdResolved, dir);
+            if (fs.existsSync(full)) {
+              const st = fs.statSync(full);
+              if (st.isDirectory()) archive.directory(full, path.basename(full));
+              else archive.file(full, { name: path.basename(full) });
+            } else {
+              this.pushLog(`备份路径不存在：${full}`);
+            }
+          }
+          archive.finalize();
+        });
+        return;
+      } else {
+        // fallback to PowerShell if archiver not available
+        const quotedPaths = worldDirs.map((dir) => `'${dir.replace(/'/g, "''")}'`).join(', ');
+        const quotedDest = dest.replace(/'/g, "''");
+        await this.runChildProcess('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `Compress-Archive -Path ${quotedPaths} -DestinationPath '${quotedDest}' -Force`
+        ], { cwd: cwdResolved });
+        return;
+      }
     }
-    await this.runChildProcess('tar', ['-czf', dest, ...worldDirs], { cwd });
+
+    await this.runChildProcess('tar', ['-czf', dest, ...worldDirs], { cwd: cwdResolved });
   }
 
   async extractBackupArchive(file, cwd) {
-    if (file.toLowerCase().endsWith('.zip')) {
+    const cwdResolved = cwd || this.resolveWorkingDir();
+    const filePath = path.isAbsolute(file) ? file : path.join(cwdResolved, file);
+
+    if (filePath.toLowerCase().endsWith('.zip')) {
+      if (extractZip) {
+        await extractZip(filePath, { dir: cwdResolved });
+        return;
+      }
       if (process.platform === 'win32') {
         const quotedFile = file.replace(/'/g, "''");
         await this.runChildProcess('powershell.exe', [
           '-NoProfile',
           '-NonInteractive',
           '-Command',
-          `Expand-Archive -Path '${quotedFile}' -DestinationPath '${cwd}' -Force`
-        ], { cwd });
+          `Expand-Archive -Path '${quotedFile}' -DestinationPath '${cwdResolved}' -Force`
+        ], { cwd: cwdResolved });
         return;
       }
-      await this.runChildProcess('unzip', ['-o', file, '-d', cwd], { cwd });
+      await this.runChildProcess('unzip', ['-o', filePath, '-d', cwdResolved], { cwd: cwdResolved });
       return;
     }
-    await this.runChildProcess('tar', ['-xzf', file, '-C', cwd], { cwd });
+
+    await this.runChildProcess('tar', ['-xzf', filePath, '-C', cwdResolved], { cwd: cwdResolved });
   }
 
   async runChildProcess(command, args, options = {}) {
