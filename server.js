@@ -980,6 +980,21 @@ const pool = mysql.createPool(dbPoolConfig);
 
 mcManager = new McServerManager(pool, __dirname, (event, serverId, payload) => {
     if (!wss || !wss.clients) return;
+
+    // 快速检查：若为 mc_stats 但没有订阅者则跳过，节省开销
+    if (event === 'mc_stats') {
+        let anySubscriber = false;
+        for (const ws of wss.clients) {
+            if (ws.readyState !== WebSocket.OPEN) continue;
+            const serverSet = ws.mcSubscriptions instanceof Set ? ws.mcSubscriptions : new Set();
+            const subscribedToThis = serverSet.has('*') || serverSet.has(String(serverId));
+            const subscribedAll = ws.subscribedMc === true;
+            const statsAllowed = ws.subscribedMcStats === true || subscribedAll || subscribedToThis;
+            if (statsAllowed) { anySubscriber = true; break; }
+        }
+        if (!anySubscriber) return;
+    }
+
     const message = Object.assign({ type: event, serverId }, payload || {});
     wss.clients.forEach((ws) => {
         if (ws.readyState !== WebSocket.OPEN) return;
@@ -1547,7 +1562,16 @@ class ClientManager {
         return Promise.all(tasks);
     }
 
+    stopHeartbeat() {
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+    }
+
     startHeartbeat() {
+        // 确保先停止旧的定时器以避免重复
+        this.stopHeartbeat();
         const limit = pLimit(CONFIG.heartbeatConcurrency);
         this.heartbeatTimer = setInterval(() => {
             // 创建快照避免遍历时修改导致的竞态条件
@@ -3646,6 +3670,22 @@ app.post('/api/maintenance/clean-expired-logs', asyncHandler(async (req, res) =>
 }));
 
 app.get('/api/test', (req, res) => res.json({ ok: true }));
+
+app.post('/api/system/heartbeat', asyncHandler(async (req, res) => {
+    const interval = Number(req.body && req.body.heartbeatInterval);
+    if (!Number.isFinite(interval) || interval < 1000) {
+        return res.status(400).json({ success: false, error: 'heartbeatInterval 必须为数字且 >= 1000（毫秒）' });
+    }
+    CONFIG.heartbeatInterval = interval;
+    try {
+        if (mcManager && typeof mcManager.startHeartbeat === 'function') {
+            mcManager.startHeartbeat();
+        }
+        res.json({ success: true, message: `心跳间隔已设置为 ${interval} ms` });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+}));
 app.post('/api/system/restart', asyncHandler(async (req, res) => {
     const processName = 'keylogger-server';
     

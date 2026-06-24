@@ -1928,10 +1928,17 @@ function hideClientModal() {
 }
 
 // 保存设置
-function saveSettings() {
-    const interval = document.getElementById('heartbeatInterval').value;
-    const timeout = document.getElementById('connectTimeout').value;
-    showToast(`设置已保存 (心跳: ${interval}ms, 超时: ${timeout}ms)`, 'success');
+async function saveSettings() {
+    const interval = Number(document.getElementById('heartbeatInterval').value) || 30000;
+    const timeout = Number(document.getElementById('connectTimeout').value) || 5000;
+    try {
+        // 将心跳间隔发送到服务器，服务器会重启心跳定时器
+        await apiFetch('/api/system/heartbeat', { method: 'POST', body: JSON.stringify({ heartbeatInterval: interval }) });
+        showToast(`设置已保存 (心跳: ${interval}ms, 超时: ${timeout}ms)`, 'success');
+    } catch (err) {
+        console.error('保存设置失败', err);
+        showToast('保存设置失败: ' + (err && err.message ? err.message : 'unknown'), 'error');
+    }
 }
 
 function confirmRestartService() {

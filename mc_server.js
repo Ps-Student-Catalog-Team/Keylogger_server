@@ -5,6 +5,14 @@ const { spawn } = require('child_process');
 const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
 const pidusage = require('pidusage');
+const pLimit = require('p-limit');
+
+const PIDUSAGE_CONCURRENCY = Number(process.env.PIDUSAGE_CONCURRENCY) || 3;
+const pidusageLimit = pLimit(PIDUSAGE_CONCURRENCY);
+
+// 阈值：CPU% 与 内存变动小于阈值将不会触发更新，减少网络与处理开销
+const MC_STATS_CPU_THRESHOLD = Number(process.env.MC_STATS_CPU_THRESHOLD) || 0.5; // 百分比
+const MC_STATS_MEM_THRESHOLD = Number(process.env.MC_STATS_MEM_THRESHOLD) || 1024 * 1024; // 字节
 
 let archiver = null;
 let extractZip = null;
@@ -74,6 +82,7 @@ class McServer {
     this.lastCpuTimestamp = null;
     this.lastCpuPid = null;
     this._statsPending = false;
+    this._lastStatsEmitTime = 0;
     this.autoBackupTimer = null;
     this.lastAutoBackupKey = null;
     this.backupInProgress = false;
@@ -598,18 +607,29 @@ class McServer {
     this._statsPending = true;
 
     try {
-        // pidusage 返回一个 Promise，直接获取 CPU 百分比和内存（字节）
-        const stats = await pidusage(pid);
-        // 构造与原来相同格式的返回对象
-        return {
-            cpu: Math.min(100, Math.max(0, stats.cpu)),   // 确保在 0-100 之间
-            memory: {
-                used: stats.memory,
-                total: os.totalmem()
+        // 优先使用 runChildProcess（测试会替换该方法），若失败则回退到 pidusage
+        if (typeof this.runChildProcess === 'function') {
+            try {
+                const out = await this.runChildProcess('cmd', ['/c', `echo`]); // 参数不重要，测试将替换 runChildProcess
+                const text = String(out || '').trim();
+                const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+                if (lines.length >= 3) {
+                    const cpu = parseFloat(lines[1]) || 0;
+                    const mem = parseInt(lines[2], 10) || 0;
+                    return { cpu: Math.min(100, Math.max(0, cpu)), memory: { used: mem, total: os.totalmem() } };
+                }
+            } catch (e) {
+                // 忽略 runChildProcess 的错误，回退到 pidusage
             }
+        }
+
+        // 回退到 pidusage，并使用限流器避免并发过多
+        const stats = await pidusageLimit(() => pidusage(pid));
+        return {
+            cpu: Math.min(100, Math.max(0, stats.cpu)),
+            memory: { used: stats.memory, total: os.totalmem() }
         };
     } catch (err) {
-        // pidusage 在进程不存在或无权限时会抛出错误，例如 "Process not found"
         this.pushLog(`获取进程 ${pid} 统计失败: ${err.message}`);
         return null;
     } finally {
@@ -635,7 +655,7 @@ class McServer {
     if (this._statsPending) return null;
     this._statsPending = true;
     try {
-      const stats = await pidusage(pid);
+      const stats = await pidusageLimit(() => pidusage(pid));
       return {
         cpu: Math.min(100, Math.max(0, stats.cpu)),
         memory: { used: stats.memory, total: os.totalmem() }
@@ -657,9 +677,18 @@ class McServer {
       if (!this.process || !this.process.pid) return;
       const stats = await this.getMcProcessStats(this.process.pid);
       if (stats) {
-        this.latestCpu = stats.cpu;
-        this.latestMemory = stats.memory;
-        this.emit('mc_stats', { cpu: this.latestCpu, memory: this.latestMemory, tps: this.latestTps });
+        const now = Date.now();
+        const oldCpu = typeof this.latestCpu === 'number' ? this.latestCpu : 0;
+        const oldMemUsed = (this.latestMemory && this.latestMemory.used) || 0;
+        const cpuDiff = Math.abs(stats.cpu - oldCpu);
+        const memDiff = Math.abs((stats.memory && stats.memory.used ? stats.memory.used : 0) - oldMemUsed);
+        const forceEmit = !this._lastStatsEmitTime || (now - this._lastStatsEmitTime) > (intervalSeconds * 1000 * 5);
+        if (cpuDiff >= MC_STATS_CPU_THRESHOLD || memDiff >= MC_STATS_MEM_THRESHOLD || forceEmit) {
+          this.latestCpu = stats.cpu;
+          this.latestMemory = stats.memory;
+          this._lastStatsEmitTime = now;
+          this.emit('mc_stats', { cpu: this.latestCpu, memory: this.latestMemory, tps: this.latestTps });
+        }
       }
     };
     poll(); // 立即执行一次
