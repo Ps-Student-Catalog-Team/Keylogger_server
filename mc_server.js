@@ -8,6 +8,7 @@ const pidusage = require('pidusage');
 
 let archiver = null;
 let extractZip = null;
+let psList = null;
 try {
   archiver = require('archiver');
 } catch (e) {
@@ -17,6 +18,11 @@ try {
   extractZip = require('extract-zip');
 } catch (e) {
   extractZip = null;
+}
+try {
+  psList = require('ps-list');
+} catch (e) {
+  psList = null;
 }
 
 
@@ -671,15 +677,9 @@ class McServer {
     try {
       if (process.platform === 'win32') {
         if (!archiver || !extractZip) {
-          this.pushLog('警告：未检测到 archiver 或 extract-zip 模块；将回退到 PowerShell（若可用）进行压缩/解压');
-          try {
-            const out = await this.runChildProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "(Get-Command Compress-Archive -ErrorAction SilentlyContinue).Name"], { windowsHide: true });
-            if (!out || !out.trim()) {
-              this.pushLog('警告：系统未检测到 PowerShell 的 Compress-Archive，备份压缩可能失败');
-            }
-          } catch (e) {
-            this.pushLog('警告：无法检测 PowerShell 的 Compress-Archive，备份压缩可能失败');
-          }
+          this.pushLog('警告：未安装 archiver 或 extract-zip 模块；请运行 `npm install archiver extract-zip`，以避免启用 PowerShell 进行压缩/解压');
+        } else {
+          this.pushLog('已检测到 archiver 与 extract-zip；将使用 Node 原生库进行压缩/解压');
         }
       } else {
         try {
@@ -892,46 +892,36 @@ class McServer {
     const destLower = String(destPath).toLowerCase();
 
     if (destLower.endsWith('.zip') || process.platform === 'win32') {
-      if (archiver) {
-        await new Promise((resolve, reject) => {
-          const output = fs.createWriteStream(destPath);
-          const archive = archiver('zip', { zlib: { level: 9 } });
-          output.on('close', resolve);
-          output.on('error', reject);
-          archive.on('warning', (err) => {
-            if (err.code === 'ENOENT') this.pushLog(`archiver warning: ${err.message}`);
-            else reject(err);
-          });
-          archive.on('error', reject);
-          archive.pipe(output);
-          for (const dir of worldDirs) {
-            const full = path.isAbsolute(dir) ? dir : path.join(cwdResolved, dir);
-            if (fs.existsSync(full)) {
-              const st = fs.statSync(full);
-              if (st.isDirectory()) archive.directory(full, path.basename(full));
-              else archive.file(full, { name: path.basename(full) });
-            } else {
-              this.pushLog(`备份路径不存在：${full}`);
-            }
-          }
-          archive.finalize();
-        });
-        return;
-      } else {
-        // fallback to PowerShell if archiver not available
-        const quotedPaths = worldDirs.map((dir) => `'${dir.replace(/'/g, "''")}'`).join(', ');
-        const quotedDest = dest.replace(/'/g, "''");
-        await this.runChildProcess('powershell.exe', [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `Compress-Archive -Path ${quotedPaths} -DestinationPath '${quotedDest}' -Force`
-        ], { cwd: cwdResolved });
-        return;
+      if (!archiver) {
+        throw new Error('archiver module is required to create zip archives on Windows. Run `npm install archiver`');
       }
+      await new Promise((resolve, reject) => {
+        const output = fs.createWriteStream(destPath);
+        const archive = archiver('zip', { zlib: { level: 9 } });
+        output.on('close', resolve);
+        output.on('error', reject);
+        archive.on('warning', (err) => {
+          if (err.code === 'ENOENT') this.pushLog(`archiver warning: ${err.message}`);
+          else reject(err);
+        });
+        archive.on('error', reject);
+        archive.pipe(output);
+        for (const dir of worldDirs) {
+          const full = path.isAbsolute(dir) ? dir : path.join(cwdResolved, dir);
+          if (fs.existsSync(full)) {
+            const st = fs.statSync(full);
+            if (st.isDirectory()) archive.directory(full, path.basename(full));
+            else archive.file(full, { name: path.basename(full) });
+          } else {
+            this.pushLog(`备份路径不存在：${full}`);
+          }
+        }
+        archive.finalize();
+      });
+      return;
     }
 
-    await this.runChildProcess('tar', ['-czf', dest, ...worldDirs], { cwd: cwdResolved });
+    await this.runChildProcess('tar', ['-czf', destPath, ...worldDirs.map(d => path.isAbsolute(d) ? d : path.join(cwdResolved, d))], { cwd: cwdResolved });
   }
 
   async extractBackupArchive(file, cwd) {
@@ -939,21 +929,10 @@ class McServer {
     const filePath = path.isAbsolute(file) ? file : path.join(cwdResolved, file);
 
     if (filePath.toLowerCase().endsWith('.zip')) {
-      if (extractZip) {
-        await extractZip(filePath, { dir: cwdResolved });
-        return;
+      if (!extractZip) {
+        throw new Error('extract-zip module is required to extract zip archives on Windows. Run `npm install extract-zip`');
       }
-      if (process.platform === 'win32') {
-        const quotedFile = file.replace(/'/g, "''");
-        await this.runChildProcess('powershell.exe', [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `Expand-Archive -Path '${quotedFile}' -DestinationPath '${cwdResolved}' -Force`
-        ], { cwd: cwdResolved });
-        return;
-      }
-      await this.runChildProcess('unzip', ['-o', filePath, '-d', cwdResolved], { cwd: cwdResolved });
+      await extractZip(filePath, { dir: cwdResolved });
       return;
     }
 
@@ -1067,25 +1046,52 @@ class McServer {
 
   async discoverExistingProcess() {
     if (this.process) return this.process;
-    const jarName = path.basename(String(this.config.jarPath || 'server.jar'));
+    const jarName = path.basename(String(this.config.jarPath || 'server.jar')).toLowerCase();
     let pid = null;
-    if (process.platform === 'win32') {
-      try {
-        const out = await this.runChildProcess('powershell.exe', [
-          '-NoProfile', '-NonInteractive', '-Command',
-          `Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'java.exe' -and $_.CommandLine -match '${jarName}' } | Select-Object -First 1 -ExpandProperty ProcessId`
-        ], { windowsHide: true });
-        pid = parseInt(out.trim(), 10);
-      } catch (e) {
-        // ignore
+    try {
+      if (process.platform === 'win32') {
+        if (psList) {
+          const procs = await psList();
+          for (const p of procs) {
+            const name = String(p.name || '').toLowerCase();
+            const cmd = String(p.cmd || p.cmdline || p.command || '').toLowerCase();
+            if ((name.includes('java') || cmd.includes('java')) && cmd.includes(jarName)) {
+              pid = Number(p.pid);
+              break;
+            }
+          }
+        } else {
+          try {
+            const out = await this.runChildProcess('cmd', ['/c', `wmic process where "Name='java.exe' and CommandLine like '%${jarName}%'" get ProcessId /FORMAT:CSV`], { windowsHide: true });
+            const lines = out.trim().split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+            for (const line of lines) {
+              const m = line.match(/,([0-9]+)$/);
+              if (m) { pid = parseInt(m[1], 10); break; }
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+      } else {
+        if (psList) {
+          const procs = await psList();
+          for (const p of procs) {
+            const name = String(p.name || '').toLowerCase();
+            const cmd = String(p.cmd || p.cmdline || p.command || '').toLowerCase();
+            if ((name.includes('java') || cmd.includes('java')) && cmd.includes(jarName)) {
+              pid = Number(p.pid);
+              break;
+            }
+          }
+        } else {
+          try {
+            const out = await this.runChildProcess('sh', ['-c', `ps -eo pid,comm,args | grep '[j]ava' | grep -F '${jarName}' | awk '{print $1; exit}'`], { windowsHide: true });
+            pid = parseInt(out.trim(), 10);
+          } catch (e) { /* ignore */ }
+        }
       }
-    } else {
-      try {
-        const out = await this.runChildProcess('sh', ['-c', `ps -eo pid,comm,args | grep '[j]ava' | grep -F '${jarName}' | awk '{print $1; exit}'`], { windowsHide: true });
-        pid = parseInt(out.trim(), 10);
-      } catch (e) {
-        // ignore
-      }
+    } catch (e) {
+      // ignore
     }
     if (pid && !Number.isNaN(pid) && pid > 0) {
       this.process = { pid, recovered: true };
@@ -1098,26 +1104,47 @@ class McServer {
   }
 
   async findJavaSubProcess(parentPid, timeoutMs = 8000) {
-      const startTime = Date.now();
-      this.pushLog(`开始查找父进程 ${parentPid} 下的 Java 子进程...`);
-      while (Date.now() - startTime < timeoutMs) {
-          try {
-              const out = await this.runChildProcess('powershell.exe', [
-                  '-NoProfile', '-NonInteractive', '-Command',
-                  `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${parentPid} -and $_.Name -eq 'java.exe' } | Select-Object -First 1 -ExpandProperty ProcessId`
-              ], { windowsHide: true });
-              const pid = parseInt(out.trim(), 10);
-              if (!isNaN(pid) && pid > 0) {
-                  this.pushLog(`找到实际 Java 子进程 PID: ${pid} (父进程: ${parentPid})`);
-                  return pid;
-              }
-          } catch (e) {
-              // 忽略错误，继续重试
+    const startTime = Date.now();
+    this.pushLog(`开始查找父进程 ${parentPid} 下的 Java 子进程...`);
+    while (Date.now() - startTime < timeoutMs) {
+      try {
+        if (psList) {
+          const procs = await psList();
+          const child = procs.find(p => Number(p.ppid) === Number(parentPid) && (String(p.name || '').toLowerCase().includes('java') || String(p.cmd || p.cmdline || '').toLowerCase().includes('java')));
+          if (child) {
+            const pid = Number(child.pid);
+            this.pushLog(`找到实际 Java 子进程 PID: ${pid} (父进程: ${parentPid})`);
+            return pid;
           }
-          await new Promise(resolve => setTimeout(resolve, 500));
+        } else if (process.platform === 'win32') {
+          try {
+            const out = await this.runChildProcess('cmd', ['/c', `wmic process where "ParentProcessId=${parentPid} and Name='java.exe'" get ProcessId /FORMAT:CSV`], { windowsHide: true });
+            const m = out.trim().match(/,([0-9]+)$/m);
+            if (m) {
+              const pid = parseInt(m[1], 10);
+              if (!isNaN(pid) && pid > 0) {
+                this.pushLog(`找到实际 Java 子进程 PID: ${pid} (父进程: ${parentPid})`);
+                return pid;
+              }
+            }
+          } catch (e) { /* ignore */ }
+        } else {
+          try {
+            const out = await this.runChildProcess('sh', ['-c', `ps --no-headers -o pid,ppid,comm,args | awk '$2==${parentPid} && $3 ~ /java/ {print $1; exit}'`], { windowsHide: true });
+            const pid = parseInt(out.trim(), 10);
+            if (!isNaN(pid) && pid > 0) {
+              this.pushLog(`找到实际 Java 子进程 PID: ${pid} (父进程: ${parentPid})`);
+              return pid;
+            }
+          } catch (e) { /* ignore */ }
+        }
+      } catch (e) {
+        // ignore
       }
-      this.pushLog(`警告：未能在 ${timeoutMs}ms 内找到 Java 子进程，将保持原有 PID (${parentPid})`);
-      return null;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    this.pushLog(`警告：未能在 ${timeoutMs}ms 内找到 Java 子进程，将保持原有 PID (${parentPid})`);
+    return null;
   }
 }
 
