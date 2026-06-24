@@ -897,7 +897,10 @@ class McServer {
       }
       await new Promise((resolve, reject) => {
         const output = fs.createWriteStream(destPath);
-        const archive = archiver('zip', { zlib: { level: 9 } });
+        const archive = (archiver && typeof archiver.ZipArchive === 'function')
+          ? new archiver.ZipArchive({ zlib: { level: 9 } })
+          : ((typeof archiver === 'function') ? archiver('zip', { zlib: { level: 9 } }) : (archiver && typeof archiver.create === 'function' ? archiver.create('zip', { zlib: { level: 9 } }) : null));
+        if (!archive) return reject(new Error('archiver module does not expose a compatible API'));
         output.on('close', resolve);
         output.on('error', reject);
         archive.on('warning', (err) => {
