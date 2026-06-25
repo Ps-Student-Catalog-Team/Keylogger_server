@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const express = require('express');
 const { spawn } = require('child_process');
 const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
@@ -64,7 +65,7 @@ class McServer {
       autoRestartMaxRetries: 3,
       playerListIntervalSeconds: 5,
       tpsIntervalSeconds: 5,
-      statsIntervalSeconds: 5
+      statsIntervalSeconds: 15
     }, config || {});
 
     this.logs = [];
@@ -108,15 +109,65 @@ class McServer {
     }
   }
 
+  getDefaultPollingConfig() {
+    return {
+      playerListIntervalSeconds: 5,
+      tpsIntervalSeconds: 5,
+      statsIntervalSeconds: 15
+    };
+  }
+
+  normalizePollingConfig(config = {}) {
+    const defaults = this.getDefaultPollingConfig();
+    const values = {};
+    values.playerListIntervalSeconds = Number(config.playerListIntervalSeconds ?? config.playerList ?? defaults.playerListIntervalSeconds);
+    values.tpsIntervalSeconds = Number(config.tpsIntervalSeconds ?? config.tps ?? defaults.tpsIntervalSeconds);
+    values.statsIntervalSeconds = Number(config.statsIntervalSeconds ?? config.stats ?? defaults.statsIntervalSeconds);
+
+    const toValidSeconds = (value, fallback) => (Number.isFinite(value) && value > 0 ? value : fallback);
+    return {
+      playerListIntervalSeconds: toValidSeconds(values.playerListIntervalSeconds, defaults.playerListIntervalSeconds),
+      tpsIntervalSeconds: toValidSeconds(values.tpsIntervalSeconds, defaults.tpsIntervalSeconds),
+      statsIntervalSeconds: toValidSeconds(values.statsIntervalSeconds, defaults.statsIntervalSeconds)
+    };
+  }
+
+  getRefreshPresetMap() {
+    return {
+      fast: { playerListIntervalSeconds: 1, statsIntervalSeconds: 5, tpsIntervalSeconds: 1 },
+      standard: { playerListIntervalSeconds: 5, statsIntervalSeconds: 15, tpsIntervalSeconds: 5 },
+      slow: { playerListIntervalSeconds: 15, statsIntervalSeconds: 30, tpsIntervalSeconds: 15 }
+    };
+  }
+
+  getRefreshPresetValues(preset = 'standard') {
+    const presets = this.getRefreshPresetMap();
+    return presets[preset] || presets.standard;
+  }
+
+  getRefreshPresetFromConfig(cfg = {}) {
+    const playerList = Number(cfg.playerListIntervalSeconds ?? cfg.playerList ?? 0);
+    const stats = Number(cfg.statsIntervalSeconds ?? cfg.stats ?? 0);
+    const tps = Number(cfg.tpsIntervalSeconds ?? cfg.tps ?? 0);
+    const values = this.getRefreshPresetValues('fast');
+    if (playerList === values.playerListIntervalSeconds && stats === values.statsIntervalSeconds && tps === values.tpsIntervalSeconds) return 'fast';
+    const standard = this.getRefreshPresetValues('standard');
+    if (playerList === standard.playerListIntervalSeconds && stats === standard.statsIntervalSeconds && tps === standard.tpsIntervalSeconds) return 'standard';
+    const slow = this.getRefreshPresetValues('slow');
+    if (playerList === slow.playerListIntervalSeconds && stats === slow.statsIntervalSeconds && tps === slow.tpsIntervalSeconds) return 'slow';
+    return 'custom';
+  }
+
   setConfig(config = {}) {
     const newConfig = Object.assign({}, this.config, config);
     newConfig.autoBackupEnabled = newConfig.autoBackupEnabled === true || String(newConfig.autoBackupEnabled) === 'true' || String(newConfig.autoBackupEnabled) === '1';
     newConfig.autoRestart = newConfig.autoRestart === true || String(newConfig.autoRestart) === 'true' || String(newConfig.autoRestart) === '1';
     newConfig.autoRestartDelaySeconds = Number(newConfig.autoRestartDelaySeconds) || 0;
     newConfig.autoRestartMaxRetries = Number(newConfig.autoRestartMaxRetries) || 0;
-    newConfig.playerListIntervalSeconds = Number(newConfig.playerListIntervalSeconds) || 0;
-    newConfig.tpsIntervalSeconds = Number(newConfig.tpsIntervalSeconds) || 0;
-    newConfig.statsIntervalSeconds = Number(newConfig.statsIntervalSeconds) || 0;
+    const pollingConfig = this.normalizePollingConfig(newConfig);
+    newConfig.playerListIntervalSeconds = pollingConfig.playerListIntervalSeconds;
+    newConfig.tpsIntervalSeconds = pollingConfig.tpsIntervalSeconds;
+    newConfig.statsIntervalSeconds = pollingConfig.statsIntervalSeconds;
     newConfig.backupRetentionCount = Number(newConfig.backupRetentionCount) || 0;
     newConfig.backupRetentionDays = Number(newConfig.backupRetentionDays) || 0;
 
@@ -139,7 +190,6 @@ class McServer {
     if (this.process && !this.process.recovered) {
       if (oldPlayerListInterval !== newPlayerListInterval) {
         this.stopPlayerListPolling();
-        this.startPlayerListPolling();
       }
       if (oldTpsInterval !== newTpsInterval) {
         this.stopTpsPolling();
@@ -233,13 +283,8 @@ class McServer {
 
   startPlayerListPolling() {
     this.stopPlayerListPolling();
-    const intervalSeconds = Number(this.config.playerListIntervalSeconds) || 0;
-    if (!intervalSeconds || !this.process || this.process.recovered || !this.process.stdin || this.process.stdin.destroyed) return;
-    this.playerListTimer = setInterval(() => {
-      if (this.process && !this.process.recovered && this.process.stdin && !this.process.stdin.destroyed) {
-        this.sendCommand('list', true);   // 自动轮询不记录日志
-      }
-    }, intervalSeconds * 1000);
+    // 玩家列表改为按需刷新，不再做周期性轮询，避免不必要的命令发送和 CPU 开销。
+    return false;
   }
 
   stopPlayerListPolling() {
@@ -247,6 +292,15 @@ class McServer {
       clearInterval(this.playerListTimer);
       this.playerListTimer = null;
     }
+  }
+
+  requestPlayerListRefresh(reason = 'manual') {
+    if (!this.process || this.process.recovered || !this.process.stdin || this.process.stdin.destroyed) return false;
+    const ok = this.sendCommand('list', true);
+    if (ok && this.emit) {
+      this.emit('mc_player_refresh_requested', { reason });
+    }
+    return ok;
   }
 
   startTpsPolling() {
@@ -607,34 +661,49 @@ class McServer {
     this._statsPending = true;
 
     try {
-        // 优先使用 runChildProcess（测试会替换该方法），若失败则回退到 pidusage
-        if (typeof this.runChildProcess === 'function') {
-            try {
-                const out = await this.runChildProcess('cmd', ['/c', `echo`]); // 参数不重要，测试将替换 runChildProcess
-                const text = String(out || '').trim();
-                const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-                if (lines.length >= 3) {
-                    const cpu = parseFloat(lines[1]) || 0;
-                    const mem = parseInt(lines[2], 10) || 0;
-                    return { cpu: Math.min(100, Math.max(0, cpu)), memory: { used: mem, total: os.totalmem() } };
-                }
-            } catch (e) {
-                // 忽略 runChildProcess 的错误，回退到 pidusage
-            }
+      if (typeof this.runChildProcess === 'function') {
+        try {
+          const out = await this.runChildProcess('cmd', ['/c', 'echo']);
+          const text = String(out || '').trim();
+          const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+          const numericLines = lines.filter((line) => /^-?\d+(?:\.\d+)?$/.test(line));
+          if (numericLines.length >= 2) {
+            const cpu = parseFloat(numericLines[numericLines.length - 2]) || 0;
+            const mem = parseInt(numericLines[numericLines.length - 1], 10) || 0;
+            return { cpu: Math.min(100, Math.max(0, cpu)), memory: { used: mem, total: os.totalmem() } };
+          }
+        } catch (e) {
+          // ignore and fall back
         }
+      }
 
-        // 回退到 pidusage，并使用限流器避免并发过多
-        const stats = await pidusageLimit(() => pidusage(pid));
-        return {
-            cpu: Math.min(100, Math.max(0, stats.cpu)),
-            memory: { used: stats.memory, total: os.totalmem() }
-        };
+      if (psList) {
+        try {
+          const procs = await psList();
+          const proc = procs.find((entry) => Number(entry.pid) === Number(pid));
+          if (proc) {
+            return {
+              cpu: Math.min(100, Math.max(0, Number(proc.cpu) || 0)),
+              memory: { used: Number(proc.memory) || 0, total: os.totalmem() }
+            };
+          }
+        } catch (e) {
+          // ignore and fall back to pidusage
+        }
+      }
+
+      // 回退到 pidusage，并使用限流器避免并发过多
+      const stats = await pidusageLimit(() => pidusage(pid));
+      return {
+        cpu: Math.min(100, Math.max(0, stats.cpu)),
+        memory: { used: stats.memory, total: os.totalmem() }
+      };
     } catch (err) {
-        this.pushLog(`获取进程 ${pid} 统计失败: ${err.message}`);
-        return null;
+      this.pushLog(`获取进程 ${pid} 统计失败: ${err.message}`);
+      return null;
     } finally {
-        // 释放并发锁
-        this._statsPending = false;
+      // 释放并发锁
+      this._statsPending = false;
     }
   }
 
@@ -1180,5 +1249,148 @@ class McServer {
   }
 }
 
+function createMcControlRouter(mcManager, logger, options = {}) {
+  const router = express.Router({ mergeParams: true });
+  const fsImpl = options.fs || fs;
+  const pathImpl = options.path || path;
+  const asyncHandler = options.asyncHandler || ((fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next));
+
+  function ensureMcServer(req, res, next) {
+    if (!mcManager || !mcManager.getServer) {
+      return res.status(500).json({ success: false, error: 'MC 管理器未初始化' });
+    }
+    const { id } = req.params;
+    const server = mcManager.getServer(id);
+    if (!server) {
+      return res.status(404).json({ success: false, error: 'MC 服务器实例未找到' });
+    }
+    req.mcServer = server;
+    next();
+  }
+
+  router.use(ensureMcServer);
+
+  router.get('/config', asyncHandler(async (req, res) => {
+    res.json({ success: true, config: req.mcServer.config, refreshPresets: req.mcServer.getRefreshPresetMap() });
+  }));
+
+  router.post('/config', asyncHandler(async (req, res) => {
+    const config = req.body || {};
+    if (logger && logger.debug) logger.debug('POST /api/mc/servers/:id/config', { id: req.params.id, body: config, ip: req.ip });
+    try {
+      req.mcServer.setConfig(config);
+      await mcManager.updateServer(req.params.id, { config: req.mcServer.config });
+      res.json({ success: true, message: '配置已保存' });
+    } catch (e) {
+      if (logger && logger.error) logger.error('POST /api/mc/servers/:id/config error', { id: req.params.id, message: e.message, stack: e.stack, body: config });
+      const statusCode = e.message === 'autoBackupCron 格式无效' ? 400 : 500;
+      res.status(statusCode).json({ success: false, error: e.message });
+    }
+  }));
+
+  router.get('/players', asyncHandler(async (req, res) => {
+    const info = req.mcServer.playerInfo || { players: [], count: 0, max: 0 };
+    res.json({ success: true, players: info.players, count: info.count, max: info.max });
+  }));
+
+  router.post('/players/refresh', asyncHandler(async (req, res) => {
+    if (!req.mcServer.process) return res.status(400).json({ success: false, error: 'Minecraft 服务器未运行' });
+    const ok = req.mcServer.requestPlayerListRefresh('manual');
+    if (!ok) return res.status(500).json({ success: false, error: '刷新玩家列表失败' });
+    res.json({ success: true, message: '玩家列表刷新中，请稍候' });
+  }));
+
+  router.post('/start', asyncHandler(async (req, res) => {
+    res.json({ success: req.mcServer.start(true) });
+  }));
+
+  router.post('/stop', asyncHandler(async (req, res) => {
+    res.json({ success: req.mcServer.stop() });
+  }));
+
+  router.post('/kill', asyncHandler(async (req, res) => {
+    res.json({ success: req.mcServer.kill() });
+  }));
+
+  router.post('/command', asyncHandler(async (req, res) => {
+    const { command } = req.body || {};
+    if (!command) return res.status(400).json({ success: false, error: '命令不能为空' });
+    res.json({ success: req.mcServer.sendCommand(String(command)) });
+  }));
+
+  router.get('/status', asyncHandler(async (req, res) => {
+    res.json(req.mcServer.getStatus());
+  }));
+
+  router.get('/logs', asyncHandler(async (req, res) => {
+    res.json({ success: true, logs: req.mcServer.getLogs() });
+  }));
+
+  router.get('/logs/download', asyncHandler(async (req, res) => {
+    const logFile = req.mcServer.logFile;
+    if (!fsImpl.existsSync(logFile)) {
+      return res.status(404).json({ success: false, error: 'MC 日志文件不存在' });
+    }
+    res.download(logFile, 'mc_latest.log', (err) => {
+      if (err) res.status(500).json({ success: false, error: '下载日志失败' });
+    });
+  }));
+
+  router.post('/sync', asyncHandler(async (req, res) => {
+    let status = req.mcServer.getStatus ? req.mcServer.getStatus() : { running: false };
+    if (!status.running) {
+      const recovered = await req.mcServer.discoverExistingProcess();
+      if (recovered) {
+        status = req.mcServer.getStatus();
+      }
+    }
+    if (status.running && status.recovered) {
+      return res.json({ success: true, message: '已检测到现有 MC 进程，进入只读恢复模式。命令发送受限，仅支持日志/状态查看。', status });
+    }
+    if (status.running) {
+      return res.json({ success: true, message: 'MC 服务器正在运行。', status });
+    }
+    res.json({ success: true, message: '未检测到可管理的 MC 进程。若进程仍在运行，请检查服务器配置或手动清理僵尸进程。', status });
+  }));
+
+  router.post('/backup', asyncHandler(async (req, res) => {
+    try {
+      const name = await req.mcServer.createBackup();
+      res.json({ success: true, name });
+    } catch (e) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  }));
+
+  router.get('/backups', asyncHandler(async (req, res) => {
+    try {
+      const backups = await req.mcServer.listBackups();
+      res.json({ success: true, backups });
+    } catch (e) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  }));
+
+  router.get('/backups/:name/download', asyncHandler(async (req, res) => {
+    const file = req.mcServer.getBackupPath(req.params.name);
+    if (!fsImpl.existsSync(file)) return res.status(404).json({ success: false, error: '备份文件不存在' });
+    res.download(file, req.params.name, (err) => {
+      if (err) res.status(500).json({ success: false, error: '下载失败' });
+    });
+  }));
+
+  router.post('/backups/:name/restore', asyncHandler(async (req, res) => {
+    try {
+      await req.mcServer.restoreBackup(req.params.name);
+      res.json({ success: true, message: '备份还原成功' });
+    } catch (e) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  }));
+
+  return router;
+}
+
 module.exports = McServer;
 module.exports.McServer = McServer;
+module.exports.createMcControlRouter = createMcControlRouter;

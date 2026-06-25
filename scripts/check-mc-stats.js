@@ -3,7 +3,7 @@ const { McServer } = require('../mc_server');
 
 async function run() {
   const s1 = new McServer('test');
-  assert.equal(s1.config.statsIntervalSeconds, 5);
+  assert.equal(s1.config.statsIntervalSeconds, 15);
 
   const s2 = new McServer('test', { statsIntervalSeconds: 3 });
   s2.process = { pid: 1234 };

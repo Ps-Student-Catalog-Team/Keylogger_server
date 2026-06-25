@@ -14,9 +14,9 @@ const MC_STATS_CHART_RANGES = {
   '1h': 60 * 60 * 1000
 };
 const MC_REFRESH_PRESET_VALUES = {
-  standard: { playerListIntervalSeconds: 1, statsIntervalSeconds: 1, tpsIntervalSeconds: 1 },
-  fast: { playerListIntervalSeconds: 0.5, statsIntervalSeconds: 0.5, tpsIntervalSeconds: 0.5 },
-  slow: { playerListIntervalSeconds: 5, statsIntervalSeconds: 5, tpsIntervalSeconds: 5 }
+  fast: { playerListIntervalSeconds: 1, statsIntervalSeconds: 5, tpsIntervalSeconds: 1 },
+  standard: { playerListIntervalSeconds: 5, statsIntervalSeconds: 15, tpsIntervalSeconds: 5 },
+  slow: { playerListIntervalSeconds: 15, statsIntervalSeconds: 30, tpsIntervalSeconds: 15 }
 };
 let mcStatsChartRange = '15m';
 
@@ -556,15 +556,15 @@ function getMcRefreshPresetFromConfig(cfg = {}) {
   const playerList = Number(cfg.playerListIntervalSeconds || 0);
   const stats = Number(cfg.statsIntervalSeconds || 0);
   const tps = Number(cfg.tpsIntervalSeconds || 0);
-  if (playerList === 0.5 && stats === 0.5 && tps === 0.5) return 'fast';
-  if (playerList === 5 && stats === 5 && tps === 5) return 'slow';
-  if (playerList === 1 && stats === 1 && tps === 1) return 'standard';
+  if (playerList === 1 && stats === 5 && tps === 1) return 'fast';
+  if (playerList === 5 && stats === 15 && tps === 5) return 'standard';
+  if (playerList === 15 && stats === 30 && tps === 15) return 'slow';
   return 'custom';
 }
 
 function getMcRefreshPresetValue(preset) {
   if (preset === 'custom') {
-    return MC_REFRESH_PRESET_VALUES.standard;
+    return { playerListIntervalSeconds: 5, statsIntervalSeconds: 15, tpsIntervalSeconds: 5 };
   }
   return MC_REFRESH_PRESET_VALUES[preset] || MC_REFRESH_PRESET_VALUES.standard;
 }
@@ -755,23 +755,45 @@ async function loadMcConfig() {
         const retentionDays = document.getElementById('mcBackupRetentionDays');
         if (retentionDays && typeof cfg.backupRetentionDays === 'number') retentionDays.value = cfg.backupRetentionDays;
         const refreshPreset = document.getElementById('mcRefreshPreset');
+        const playerListInput = document.getElementById('mcPlayerListInterval');
+        const statsInput = document.getElementById('mcStatsInterval');
+        const tpsInput = document.getElementById('mcTpsInterval');
+        const applyPresetValues = (preset) => {
+            const values = getMcRefreshPresetValue(preset);
+            if (playerListInput) playerListInput.value = values.playerListIntervalSeconds;
+            if (statsInput) statsInput.value = values.statsIntervalSeconds;
+            if (tpsInput) tpsInput.value = values.tpsIntervalSeconds;
+        };
         if (refreshPreset) {
             refreshPreset.value = getMcRefreshPresetFromConfig(cfg);
-        }
-        const playerListInput = document.getElementById('mcPlayerListInterval');
-        if (playerListInput && typeof cfg.playerListIntervalSeconds === 'number') playerListInput.value = cfg.playerListIntervalSeconds;
-        const statsInput = document.getElementById('mcStatsInterval');
-        if (statsInput && typeof cfg.statsIntervalSeconds === 'number') statsInput.value = cfg.statsIntervalSeconds;
-        const tpsInput = document.getElementById('mcTpsInterval');
-        if (tpsInput && typeof cfg.tpsIntervalSeconds === 'number') tpsInput.value = cfg.tpsIntervalSeconds;
-        if (refreshPreset) {
             refreshPreset.onchange = () => {
                 if (refreshPreset.value === 'custom') return;
-                const values = getMcRefreshPresetValue(refreshPreset.value);
-                if (playerListInput) playerListInput.value = values.playerListIntervalSeconds;
-                if (statsInput) statsInput.value = values.statsIntervalSeconds;
-                if (tpsInput) tpsInput.value = values.tpsIntervalSeconds;
+                applyPresetValues(refreshPreset.value);
             };
+        }
+        if (playerListInput && typeof cfg.playerListIntervalSeconds === 'number') playerListInput.value = cfg.playerListIntervalSeconds;
+        if (statsInput && typeof cfg.statsIntervalSeconds === 'number') statsInput.value = cfg.statsIntervalSeconds;
+        if (tpsInput && typeof cfg.tpsIntervalSeconds === 'number') tpsInput.value = cfg.tpsIntervalSeconds;
+        if (playerListInput) {
+            playerListInput.addEventListener('input', () => {
+                if (refreshPreset && refreshPreset.value !== 'custom') {
+                    refreshPreset.value = 'custom';
+                }
+            });
+        }
+        if (statsInput) {
+            statsInput.addEventListener('input', () => {
+                if (refreshPreset && refreshPreset.value !== 'custom') {
+                    refreshPreset.value = 'custom';
+                }
+            });
+        }
+        if (tpsInput) {
+            tpsInput.addEventListener('input', () => {
+                if (refreshPreset && refreshPreset.value !== 'custom') {
+                    refreshPreset.value = 'custom';
+                }
+            });
         }
 
         // 更新命令预览
@@ -1186,7 +1208,7 @@ async function createMcServer() {
     const response = await fetch('/api/mc/servers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, config: { fullCommand: '', workingDir: '', backupDir: 'backups', autoRestart: false, autoRestartDelaySeconds: 5, autoRestartMaxRetries: 3, autoBackupEnabled: false, autoBackupCron: '', backupRetentionCount: 7, backupRetentionDays: 30, playerListIntervalSeconds: 1, statsIntervalSeconds: 1, tpsIntervalSeconds: 1 } })
+      body: JSON.stringify({ name, config: { fullCommand: '', workingDir: '', backupDir: 'backups', autoRestart: false, autoRestartDelaySeconds: 5, autoRestartMaxRetries: 3, autoBackupEnabled: false, autoBackupCron: '', backupRetentionCount: 7, backupRetentionDays: 30, playerListIntervalSeconds: 5, statsIntervalSeconds: 15, tpsIntervalSeconds: 5 } })
     });
     const result = await response.json();
     if (result.success) {

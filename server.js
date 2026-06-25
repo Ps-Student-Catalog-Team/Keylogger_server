@@ -21,6 +21,7 @@ const { execFile } = require('child_process');
 const { LRUCache } = require('lru-cache');
 const rateLimit = require('express-rate-limit');
 const McServerManager = require('./mc_manager');
+const { createMcControlRouter } = require('./mc_server');
 
 // ========== 版本缓存 ==========
 const versionCache = new LRUCache({
@@ -437,16 +438,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 let mcManager;
 
 
-function ensureMcServer(req, res, next) {
-    const { id } = req.params;
-    const server = mcManager.getServer(id);
-    if (!server) {
-        return res.status(404).json({ success: false, error: 'MC 服务器实例未找到' });
-    }
-    req.mcServer = server;
-    next();
-}
-
 app.get('/api/mc/servers', asyncHandler(async (req, res) => {
     const list = mcManager.getAllServersInfo();
     res.json({ success: true, servers: list });
@@ -493,128 +484,6 @@ app.delete('/api/mc/servers/:id', asyncHandler(async (req, res) => {
     }
 }));
 
-const mcRouter = express.Router({ mergeParams: true });
-mcRouter.use(ensureMcServer);
-
-mcRouter.get('/config', asyncHandler(async (req, res) => {
-    res.json({ success: true, config: req.mcServer.config });
-}));
-
-mcRouter.post('/config', asyncHandler(async (req, res) => {
-    const config = req.body || {};
-    logger.debug('POST /api/mc/servers/:id/config', { id: req.params.id, body: config, ip: req.ip });
-    try {
-        req.mcServer.setConfig(config);
-        await mcManager.updateServer(req.params.id, { config: req.mcServer.config });
-        res.json({ success: true, message: '配置已保存' });
-    } catch (e) {
-        logger.error('POST /api/mc/servers/:id/config error', { id: req.params.id, message: e.message, stack: e.stack, body: config });
-        const statusCode = e.message === 'autoBackupCron 格式无效' ? 400 : 500;
-        res.status(statusCode).json({ success: false, error: e.message });
-    }
-}));
-
-mcRouter.get('/players', asyncHandler(async (req, res) => {
-    const info = req.mcServer.playerInfo || { players: [], count: 0, max: 0 };
-    res.json({ success: true, players: info.players, count: info.count, max: info.max });
-}));
-
-mcRouter.post('/players/refresh', asyncHandler(async (req, res) => {
-    if (!req.mcServer.process) return res.status(400).json({ success: false, error: 'Minecraft 服务器未运行' });
-    const ok = req.mcServer.sendCommand('list');
-    if (!ok) return res.status(500).json({ success: false, error: '刷新玩家列表失败' });
-    res.json({ success: true, message: '玩家列表刷新中，请稍候' });
-}));
-
-mcRouter.post('/start', asyncHandler(async (req, res) => {
-    res.json({ success: req.mcServer.start(true) });
-}));
-
-mcRouter.post('/stop', asyncHandler(async (req, res) => {
-    res.json({ success: req.mcServer.stop() });
-}));
-
-mcRouter.post('/kill', asyncHandler(async (req, res) => {
-    res.json({ success: req.mcServer.kill() });
-}));
-
-mcRouter.post('/command', asyncHandler(async (req, res) => {
-    const { command } = req.body || {};
-    if (!command) return res.status(400).json({ success: false, error: '命令不能为空' });
-    res.json({ success: req.mcServer.sendCommand(String(command)) });
-}));
-
-mcRouter.get('/status', asyncHandler(async (req, res) => {
-    res.json(req.mcServer.getStatus());
-}));
-
-mcRouter.get('/logs', asyncHandler(async (req, res) => {
-    res.json({ success: true, logs: req.mcServer.getLogs() });
-}));
-
-mcRouter.get('/logs/download', asyncHandler(async (req, res) => {
-    const logFile = req.mcServer.logFile;
-    if (!fs.existsSync(logFile)) {
-        return res.status(404).json({ success: false, error: 'MC 日志文件不存在' });
-    }
-    res.download(logFile, 'mc_latest.log', (err) => {
-        if (err) res.status(500).json({ success: false, error: '下载日志失败' });
-    });
-}));
-
-mcRouter.post('/sync', asyncHandler(async (req, res) => {
-    let status = req.mcServer.getStatus ? req.mcServer.getStatus() : { running: false };
-    if (!status.running) {
-      const recovered = await req.mcServer.discoverExistingProcess();
-      if (recovered) {
-        status = req.mcServer.getStatus();
-      }
-    }
-    if (status.running && status.recovered) {
-      return res.json({ success: true, message: '已检测到现有 MC 进程，进入只读恢复模式。命令发送受限，仅支持日志/状态查看。', status });
-    }
-    if (status.running) {
-      return res.json({ success: true, message: 'MC 服务器正在运行。', status });
-    }
-    res.json({ success: true, message: '未检测到可管理的 MC 进程。若进程仍在运行，请检查服务器配置或手动清理僵尸进程。', status });
-}));
-
-mcRouter.post('/backup', asyncHandler(async (req, res) => {
-    try {
-        const name = await req.mcServer.createBackup();
-        res.json({ success: true, name });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-}));
-
-mcRouter.get('/backups', asyncHandler(async (req, res) => {
-    try {
-        const backups = await req.mcServer.listBackups();
-        res.json({ success: true, backups });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-}));
-
-mcRouter.get('/backups/:name/download', asyncHandler(async (req, res) => {
-    const file = req.mcServer.getBackupPath(req.params.name);
-    if (!fs.existsSync(file)) return res.status(404).json({ success: false, error: '备份文件不存在' });
-    res.download(file, req.params.name, (err) => {
-        if (err) res.status(500).json({ success: false, error: '下载失败' });
-    });
-}));
-
-mcRouter.post('/backups/:name/restore', asyncHandler(async (req, res) => {
-    try {
-        await req.mcServer.restoreBackup(req.params.name);
-        res.json({ success: true, message: '备份还原成功' });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-}));
-
-app.use('/api/mc/:id', mcRouter);
 
 // ========== Alist 客户端 ==========
 class AlistClient {
@@ -1009,6 +878,9 @@ mcManager = new McServerManager(pool, __dirname, (event, serverId, payload) => {
         sendWebSocketJson(ws, message);
     });
 });
+
+const mcRouter = createMcControlRouter(mcManager, logger, { asyncHandler, fs, path });
+app.use('/api/mc/:id', mcRouter);
 
 pool.on('acquire', (connection) => {
     logger.debug(`数据库连接 ${connection.threadId} 被获取`);
