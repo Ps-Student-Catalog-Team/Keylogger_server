@@ -20,8 +20,7 @@ const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { LRUCache } = require('lru-cache');
 const rateLimit = require('express-rate-limit');
-const McServerManager = require('./mc_manager');
-const { createMcControlRouter } = require('./mc_server');
+const { McServerManager, createMcControlRouter } = require('./mc_server');
 
 // ========== 版本缓存 ==========
 const versionCache = new LRUCache({
