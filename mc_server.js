@@ -7,6 +7,7 @@ const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
 const pidusage = require('pidusage');
 const pLimit = require('p-limit');
+const childProcessLimit = pLimit(5);
 
 const PIDUSAGE_CONCURRENCY = Number(process.env.PIDUSAGE_CONCURRENCY) || 3;
 const pidusageLimit = pLimit(PIDUSAGE_CONCURRENCY);
@@ -94,6 +95,10 @@ class McServer {
     this._processDiscoveryCacheExpiresAt = 0;
     this.logDir = path.join(this.baseDir, 'logs', 'mc', this.id);
     this.logFile = path.join(this.logDir, 'latest.log');
+    this.logBuffer = [];
+    this.logFlushTimer = null;
+    this._startLogFlusher();
+
     try {
       this.ensureLogDir();
     } catch (e) {
@@ -543,35 +548,57 @@ class McServer {
     const normalized = raw.replace(/\r?\n$/, '');
     if (!normalized) return;
 
-    // 过滤掉自动轮询产生的 TPS 输出（避免控制台刷屏）
-    // 去除 ANSI 码后再判断是否包含 "TPS from last"
+    // 过滤 TPS 自动轮询行（不记录日志，只解析数值）
     const cleanForFilter = normalized.replace(/\u001b\[[0-9;]*m/g, '');
     if (cleanForFilter.includes('TPS from last')) {
-        // 如果是自动轮询的 TPS 行，不记录到日志，也不显示
-        // 但仍然更新内部的 TPS 数值（需要调用 updateTpsFromLine 以更新数据）
-        this.updateTpsFromLine(normalized);
-        return;
+      this.updateTpsFromLine(normalized);
+      return;
     }
 
     const parts = normalized.split(/\r?\n/);
-    parts.forEach((part) => {
-        const trimmed = String(part || '').trim();
-        if (!trimmed) return;
-        const formatted = `${new Date().toISOString()} ${trimmed}`;
-        this.logs.push(formatted);
-        while (this.logs.length > LOG_MAX_LINES) this.logs.shift();
-        this.ensureLogDir();
-        fs.promises.appendFile(this.logFile, formatted + os.EOL).catch(() => {});
+    for (const part of parts) {
+      const trimmed = String(part || '').trim();
+      if (!trimmed) continue;
+      const formatted = `${new Date().toISOString()} ${trimmed}`;
 
-        const level = this.classifyLogLevel(trimmed);
-        this.updatePlayerInfoFromLine(trimmed);
-        this.updateTpsFromLine(trimmed);  // 解析 TPS 数值
-        if (this.saveAllWaiters.length && /Saved (?:the game|world|server state)/i.test(trimmed)) {
-            this.saveAllWaiters.splice(0, this.saveAllWaiters.length).forEach((resolve) => resolve(true));
-        }
-        this.emit('mc_log', { line: trimmed, level });
-    });
+      // 写入内存缓冲区（而非直接写文件）
+      this.logBuffer.push(formatted + os.EOL);
+      if (this.logBuffer.length >= 50) {
+        this.flushLogBuffer(); // 达到 50 行立即刷新
+      }
+
+      // 保留内存日志（最多 2000 行）
+      this.logs.push(formatted);
+      while (this.logs.length > LOG_MAX_LINES) this.logs.shift();
+
+      // 解析玩家/TPS 信息（非阻塞）
+      this.updatePlayerInfoFromLine(trimmed);
+      this.updateTpsFromLine(trimmed);
+
+      // 处理 save-all 等待回调
+      if (this.saveAllWaiters.length && /Saved (?:the game|world|server state)/i.test(trimmed)) {
+        this.saveAllWaiters.splice(0, this.saveAllWaiters.length).forEach((resolve) => resolve(true));
+      }
+
+      // WebSocket 发送（保持单条，但可增加节流，此处先保留）
+      this.emit('mc_log', { line: trimmed, level: this.classifyLogLevel(trimmed) });
+    }
   }
+
+  _startLogFlusher() {
+    if (this.logFlushTimer) clearInterval(this.logFlushTimer);
+    this.logFlushTimer = setInterval(() => {
+      this.flushLogBuffer();
+    }, 2000);
+  }
+
+  flushLogBuffer() {
+    if (this.logBuffer.length === 0) return;
+    const chunk = this.logBuffer.join('');
+    this.logBuffer = [];
+    fs.promises.appendFile(this.logFile, chunk).catch(() => {});
+  }
+
 
   getLogs(limit = 200) {
     return this.logs.slice(-limit);
@@ -664,27 +691,18 @@ class McServer {
   }
 
   async getWindowsProcessStats(pid) {
-    // 防止并发重叠，保持与原来一致
+    if (!pid) return null;
     if (this._statsPending) return null;
     this._statsPending = true;
-
     try {
-      if (typeof this.runChildProcess === 'function') {
-        try {
-          const out = await this.runChildProcess('cmd', ['/c', 'echo']);
-          const text = String(out || '').trim();
-          const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-          const numericLines = lines.filter((line) => /^-?\d+(?:\.\d+)?$/.test(line));
-          if (numericLines.length >= 2) {
-            const cpu = parseFloat(numericLines[numericLines.length - 2]) || 0;
-            const mem = parseInt(numericLines[numericLines.length - 1], 10) || 0;
-            return { cpu: Math.min(100, Math.max(0, cpu)), memory: { used: mem, total: os.totalmem() } };
-          }
-        } catch (e) {
-          // ignore and fall back
-        }
-      }
-
+      // 直接使用 pidusage
+      const stats = await pidusageLimit(() => pidusage(pid));
+      return {
+        cpu: Math.min(100, Math.max(0, stats.cpu)),
+        memory: { used: stats.memory, total: os.totalmem() }
+      };
+    } catch (err) {
+      // 备选：如果 pidusage 失败（如进程退出），尝试 ps-list
       if (psList) {
         try {
           const procs = await psList();
@@ -695,22 +713,11 @@ class McServer {
               memory: { used: Number(proc.memory) || 0, total: os.totalmem() }
             };
           }
-        } catch (e) {
-          // ignore and fall back to pidusage
-        }
+        } catch (e) { /* ignore */ }
       }
-
-      // 回退到 pidusage，并使用限流器避免并发过多
-      const stats = await pidusageLimit(() => pidusage(pid));
-      return {
-        cpu: Math.min(100, Math.max(0, stats.cpu)),
-        memory: { used: stats.memory, total: os.totalmem() }
-      };
-    } catch (err) {
       this.pushLog(`获取进程 ${pid} 统计失败: ${err.message}`);
       return null;
     } finally {
-      // 释放并发锁
       this._statsPending = false;
     }
   }
@@ -995,42 +1002,41 @@ class McServer {
   async createBackupArchive(worldDirs, dest, cwd) {
     const cwdResolved = cwd || this.resolveWorkingDir();
     const destPath = path.isAbsolute(dest) ? dest : path.join(cwdResolved, dest);
-    const destLower = String(destPath).toLowerCase();
 
-    if (destLower.endsWith('.zip') || process.platform === 'win32') {
-      if (!archiver) {
-        throw new Error('archiver module is required to create zip archives on Windows. Run `npm install archiver`');
-      }
-      await new Promise((resolve, reject) => {
-        const output = fs.createWriteStream(destPath);
-        const archive = (archiver && typeof archiver.ZipArchive === 'function')
-          ? new archiver.ZipArchive({ zlib: { level: 9 } })
-          : ((typeof archiver === 'function') ? archiver('zip', { zlib: { level: 9 } }) : (archiver && typeof archiver.create === 'function' ? archiver.create('zip', { zlib: { level: 9 } }) : null));
-        if (!archive) return reject(new Error('archiver module does not expose a compatible API'));
-        output.on('close', resolve);
-        output.on('error', reject);
-        archive.on('warning', (err) => {
-          if (err.code === 'ENOENT') this.pushLog(`archiver warning: ${err.message}`);
-          else reject(err);
-        });
-        archive.on('error', reject);
-        archive.pipe(output);
-        for (const dir of worldDirs) {
-          const full = path.isAbsolute(dir) ? dir : path.join(cwdResolved, dir);
-          if (fs.existsSync(full)) {
-            const st = fs.statSync(full);
-            if (st.isDirectory()) archive.directory(full, path.basename(full));
-            else archive.file(full, { name: path.basename(full) });
-          } else {
-            this.pushLog(`备份路径不存在：${full}`);
-          }
-        }
-        archive.finalize();
-      });
-      return;
+    // 强制使用 archiver（无论平台），如果未安装则报错
+    if (!archiver) {
+      throw new Error('archiver module is required for backups. Run `npm install archiver`');
     }
 
-    await this.runChildProcess('tar', ['-czf', destPath, ...worldDirs.map(d => path.isAbsolute(d) ? d : path.join(cwdResolved, d))], { cwd: cwdResolved });
+    // 统一使用 zip 格式（Windows 原生支持，且 archiver 跨平台）
+    await new Promise((resolve, reject) => {
+      const output = fs.createWriteStream(destPath);
+      const archive = (typeof archiver === 'function') 
+        ? archiver('zip', { zlib: { level: 9 } }) 
+        : (archiver.create ? archiver.create('zip', { zlib: { level: 9 } }) : null);
+      if (!archive) return reject(new Error('archiver module API 不兼容'));
+
+      output.on('close', resolve);
+      output.on('error', reject);
+      archive.on('warning', (err) => {
+        if (err.code === 'ENOENT') this.pushLog(`archiver warning: ${err.message}`);
+        else reject(err);
+      });
+      archive.on('error', reject);
+      archive.pipe(output);
+
+      for (const dir of worldDirs) {
+        const full = path.isAbsolute(dir) ? dir : path.join(cwdResolved, dir);
+        if (fs.existsSync(full)) {
+          const st = fs.statSync(full);
+          if (st.isDirectory()) archive.directory(full, path.basename(full));
+          else archive.file(full, { name: path.basename(full) });
+        } else {
+          this.pushLog(`备份路径不存在：${full}`);
+        }
+      }
+      archive.finalize();
+    });
   }
 
   async extractBackupArchive(file, cwd) {
@@ -1049,23 +1055,24 @@ class McServer {
   }
 
   async runChildProcess(command, args, options = {}) {
-    return new Promise((resolve, reject) => {
-      const child = spawn(command, args, { windowsHide: true, ...options });
-      let stdout = '';
-      let stderr = '';
-      child.stdout.on('data', (data) => { stdout += this.decodeProcessOutput(data); });
-      child.stderr.on('data', (data) => { stderr += this.decodeProcessOutput(data); });
-      child.on('close', (code) => {
-        if (code === 0) {
-          resolve(stdout);
-          return;
-        }
-        reject(new Error(stderr || stdout || `退出码 ${code}`));
+    return childProcessLimit(async () => {
+      return new Promise((resolve, reject) => {
+        const child = spawn(command, args, { windowsHide: true, ...options });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (data) => { stdout += this.decodeProcessOutput(data); });
+        child.stderr.on('data', (data) => { stderr += this.decodeProcessOutput(data); });
+        child.on('close', (code) => {
+          if (code === 0) {
+            resolve(stdout);
+            return;
+          }
+          reject(new Error(stderr || stdout || `退出码 ${code}`));
+        });
+        child.on('error', (err) => reject(err));
       });
-      child.on('error', (err) => reject(err));
     });
   }
-
   async safeBackupWorlds(worldDirs, dest, cwd) {
     let saveOffSent = false;
     if (this.process) {
@@ -1159,56 +1166,41 @@ class McServer {
     if (this._processDiscoveryCache && now < this._processDiscoveryCacheExpiresAt) {
       return this._processDiscoveryCache;
     }
+
     const jarName = path.basename(String(this.config.jarPath || 'server.jar')).toLowerCase();
     let pid = null;
+
     try {
-      if (process.platform === 'win32') {
-        if (psList) {
-          const procs = await psList();
-          for (const p of procs) {
-            const name = String(p.name || '').toLowerCase();
-            const cmd = String(p.cmd || p.cmdline || p.command || '').toLowerCase();
-            if ((name.includes('java') || cmd.includes('java')) && cmd.includes(jarName)) {
-              pid = Number(p.pid);
-              break;
-            }
-          }
-        } else {
-          try {
-            const out = await this.runChildProcess('cmd', ['/c', `wmic process where "Name='java.exe' and CommandLine like '%${jarName}%'" get ProcessId /FORMAT:CSV`], { windowsHide: true });
-            const lines = out.trim().split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-            for (const line of lines) {
-              const m = line.match(/,([0-9]+)$/);
-              if (m) { pid = parseInt(m[1], 10); break; }
-            }
-          } catch (e) {
-            // ignore
+      // 优先使用 ps-list 
+      if (psList) {
+        const procs = await psList();
+        for (const p of procs) {
+          const name = String(p.name || '').toLowerCase();
+          const cmd = String(p.cmd || p.cmdline || p.command || '').toLowerCase();
+          if ((name.includes('java') || cmd.includes('java')) && cmd.includes(jarName)) {
+            pid = Number(p.pid);
+            break;
           }
         }
       } else {
-        if (psList) {
-          const procs = await psList();
-          for (const p of procs) {
-            const name = String(p.name || '').toLowerCase();
-            const cmd = String(p.cmd || p.cmdline || p.command || '').toLowerCase();
-            if ((name.includes('java') || cmd.includes('java')) && cmd.includes(jarName)) {
-              pid = Number(p.pid);
-              break;
-            }
+        // 备选：wmic
+        try {
+          const out = await this.runChildProcess('cmd', ['/c', `wmic process where "Name='java.exe' and CommandLine like '%${jarName}%'" get ProcessId /FORMAT:CSV`], { windowsHide: true });
+          const lines = out.trim().split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+          for (const line of lines) {
+            const m = line.match(/,([0-9]+)$/);
+            if (m) { pid = parseInt(m[1], 10); break; }
           }
-        } else {
-          try {
-            const out = await this.runChildProcess('sh', ['-c', `ps -eo pid,comm,args | grep '[j]ava' | grep -F '${jarName}' | awk '{print $1; exit}'`], { windowsHide: true });
-            pid = parseInt(out.trim(), 10);
-          } catch (e) { /* ignore */ }
-        }
+        } catch (e) { /* ignore */ }
       }
     } catch (e) {
       // ignore
     }
+
     const discovered = pid && !Number.isNaN(pid) && pid > 0 ? { pid, recovered: true } : null;
     this._processDiscoveryCache = discovered;
-    this._processDiscoveryCacheExpiresAt = Date.now() + 5000;
+    this._processDiscoveryCacheExpiresAt = Date.now() + 30000; // 延长至 30 秒
+
     if (discovered) {
       this.process = discovered;
       this.stopPlayerListPolling();

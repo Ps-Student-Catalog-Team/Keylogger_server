@@ -25,7 +25,7 @@ const { McServerManager, createMcControlRouter } = require('./mc_server');
 // ========== 版本缓存 ==========
 const versionCache = new LRUCache({
     max: 1, // 只缓存一个条目
-    ttl: 1 * 60 * 1000, // 5分钟TTL
+    ttl: 1 * 60 * 1000, //  1分钟TTL
 });
 
 // ========== 黑名单缓存管理 ==========
